@@ -49,6 +49,29 @@ class Store(private val ctx: Context) {
     val exps = mutableStateListOf<Exp>()
     val totalColl get() = colls.sumOf { it.amount }
     val totalExp get() = exps.sumOf { it.amount }
+    val share get() = if (members.isEmpty()) 0.0 else totalExp / members.size
+    fun paid(m: String) = exps.filter { it.member == m }.sumOf { it.amount }
+    private fun isMember(n: String) = members.any { it.equals(n.trim(), true) }
+    // balance > 0: should receive, < 0: should pay. Collections between members adjust it.
+    fun balance(m: String): Double {
+        val given = colls.filter { it.member == m && isMember(it.toWhom) && !it.toWhom.trim().equals(m, true) }.sumOf { it.amount }
+        val recv = colls.filter { it.toWhom.trim().equals(m, true) && it.member != m }.sumOf { it.amount }
+        return paid(m) + given - recv - share
+    }
+    fun settlements(): List<Triple<String, String, Double>> {
+        val deb = members.associateWith { -balance(it) }.filter { it.value > 0.005 }.toMutableMap()
+        val cre = members.associateWith { balance(it) }.filter { it.value > 0.005 }.toMutableMap()
+        val out = mutableListOf<Triple<String, String, Double>>()
+        while (deb.isNotEmpty() && cre.isNotEmpty()) {
+            val d = deb.maxByOrNull { it.value }!!; val c = cre.maxByOrNull { it.value }!!
+            val a = minOf(d.value, c.value)
+            out.add(Triple(d.key, c.key, a))
+            deb[d.key] = d.value - a; cre[c.key] = c.value - a
+            if (deb[d.key]!! < 0.005) deb.remove(d.key)
+            if (cre[c.key]!! < 0.005) cre.remove(c.key)
+        }
+        return out
+    }
 
     init {
         val s = ctx.getSharedPreferences("data", Context.MODE_PRIVATE).getString("json", null)
@@ -96,7 +119,19 @@ fun csv(s: Store): String {
     return b.toString()
 }
 
-fun writePdf(ctx: Context, uri: Uri, s: Store) {
+fun csvSettle(s: Store): String {
+    fun q(t: String) = "\"" + t.replace("\"", "\"\"") + "\""
+    val b = StringBuilder()
+    b.appendLine(q("Members Report: " + s.title))
+    b.appendLine("Total Members,${s.members.size}"); b.appendLine("Total Expense,${s.totalExp}"); b.appendLine("Equal Share Per Person,${s.share}")
+    b.appendLine(); b.appendLine("Member,Paid,Share,Balance")
+    s.members.forEach { b.appendLine("${q(it)},${s.paid(it)},${s.share},${s.balance(it)}") }
+    b.appendLine(); b.appendLine("Who Gives,To Whom,Amount")
+    s.settlements().forEach { b.appendLine("${q(it.first)},${q(it.second)},${it.third}") }
+    return b.toString()
+}
+
+fun writePdf(ctx: Context, uri: Uri, s: Store, settle: Boolean = false) {
     val doc = PdfDocument(); var n = 1
     var page = doc.startPage(PdfDocument.PageInfo.Builder(595, 842, n).create()); var y = 50f
     val p = Paint()
@@ -108,6 +143,19 @@ fun writePdf(ctx: Context, uri: Uri, s: Store) {
     }
     row(listOf(s.title.ifBlank { "Contribution Information" }), 18f, true)
     row(listOf("Report generated: " + today())); y += 8
+    if (settle) {
+        row(listOf("Total Members: ${s.members.size}", "", ""), bold = true)
+        row(listOf("Total Expense: ${money(s.totalExp)}", "", ""), bold = true)
+        row(listOf("Equal share per person: ${money(s.share)}", "", ""), bold = true); y += 8
+        row(listOf("Member", "Paid", "Balance"), bold = true)
+        s.members.forEach { row(listOf(it, money(s.paid(it)), money(s.balance(it)))) }
+        y += 8; row(listOf("Who gives -> To whom", "", "Amount"), bold = true)
+        s.settlements().forEach { row(listOf("${it.first} -> ${it.second}", "", money(it.third))) }
+        if (s.settlements().isEmpty()) row(listOf("All settled"))
+        doc.finishPage(page)
+        ctx.contentResolver.openOutputStream(uri)?.use { doc.writeTo(it) }
+        doc.close(); return
+    }
     row(listOf("Category", "Entries", "Total"), bold = true)
     CATEGORIES.forEach { c -> val l = s.exps.filter { it.category == c }; row(listOf(c, "${l.size}", money(l.sumOf { it.amount }))) }
     row(listOf("Total Expenses", "", money(s.totalExp)), bold = true); y += 8
@@ -139,6 +187,7 @@ fun App(s: Store, onExit: () -> Unit) {
                 "coll" -> Scaffold1("Collection", { screen = "main" }) { CollScreen(s) }
                 "exp" -> Scaffold1("Expenses", { screen = "main" }) { ExpScreen(s) }
                 "report" -> Scaffold1("Report", { screen = "main" }) { ReportScreen(s) }
+                "settle" -> Scaffold1("Members & Settlement", { screen = "main" }) { SettleScreen(s) }
             }
         }
         Text(APP_VERSION, Modifier.fillMaxWidth().background(Teal).padding(6.dp).navigationBarsPadding(),
@@ -183,6 +232,10 @@ fun MainPage(s: Store, go: (String) -> Unit, onExit: () -> Unit) {
             StatCard("Difference", money(s.totalColl - s.totalExp), Modifier.weight(1f))
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            StatCard("Members", "${s.members.size}", Modifier.weight(1f))
+            StatCard("Share / Person", money(s.share), Modifier.weight(2f))
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button({ go("member") }, Modifier.weight(1f)) { Text("Member Entry") }
             Button({ go("coll") }, Modifier.weight(1f)) { Text("Collection") }
         }
@@ -190,6 +243,7 @@ fun MainPage(s: Store, go: (String) -> Unit, onExit: () -> Unit) {
             Button({ go("exp") }, Modifier.weight(1f)) { Text("Expenses") }
             Button({ go("report") }, Modifier.weight(1f)) { Text("Report") }
         }
+        Button({ go("settle") }, Modifier.fillMaxWidth()) { Text("Members List & Who Pays Whom") }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedButton({ exportJson.launch("contribution_backup.json") }, Modifier.weight(1f)) { Text("Export & Save") }
             OutlinedButton({ importJson.launch(arrayOf("*/*")) }, Modifier.weight(1f)) { Text("Import") }
@@ -211,6 +265,7 @@ fun Drop(label: String, options: List<String>, sel: String, onSel: (String) -> U
 fun MemberScreen(s: Store) {
     var name by remember { mutableStateOf("") }
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text("Total members: ${s.members.size}", fontWeight = FontWeight.Bold, color = Teal)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
             OutlinedTextField(name, { name = it }, label = { Text("Member name") }, modifier = Modifier.weight(1f), singleLine = true)
             Button({ val n = name.trim(); if (n.isNotEmpty() && n !in s.members) { s.members.add(n); s.save(); name = "" } }) { Text("Add") }
@@ -290,6 +345,36 @@ fun ReportScreen(s: Store) {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button({ pdf.launch("contribution_report.pdf") }, Modifier.weight(1f)) { Text("Export PDF") }
             Button({ xls.launch("contribution_report.csv") }, Modifier.weight(1f)) { Text("Export Excel") }
+        }
+    }
+}
+
+@Composable
+fun SettleScreen(s: Store) {
+    val ctx = LocalContext.current
+    val pdf = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/pdf")) { u ->
+        u?.let { runCatching { writePdf(ctx, it, s, true); toast(ctx, "PDF saved") }.onFailure { toast(ctx, "PDF failed") } } }
+    val xls = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/csv")) { u ->
+        u?.let { write(ctx, it, csvSettle(s)); toast(ctx, "Excel (CSV) saved") } }
+    val sets = s.settlements()
+    Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text("Total members: ${s.members.size}", fontWeight = FontWeight.Bold)
+        Text("Total expense: ${money(s.totalExp)}")
+        Text("Equal share per person: ${money(s.share)}", fontWeight = FontWeight.Bold, color = Teal)
+        Spacer(Modifier.height(6.dp))
+        Row(Modifier.fillMaxWidth()) { Text("Member", Modifier.weight(2f), fontWeight = FontWeight.Bold); Text("Paid", Modifier.weight(1.5f), fontWeight = FontWeight.Bold); Text("Balance", Modifier.weight(1.5f), fontWeight = FontWeight.Bold) }
+        s.members.forEach { m ->
+            Row(Modifier.fillMaxWidth()) { Text(m, Modifier.weight(2f)); Text(money(s.paid(m)), Modifier.weight(1.5f), fontSize = 13.sp); Text(money(s.balance(m)), Modifier.weight(1.5f), fontSize = 13.sp) }
+        }
+        Text("Balance: + will receive, − will pay", fontSize = 11.sp)
+        HorizontalDivider(Modifier.padding(vertical = 6.dp))
+        Text("Who gives whom", fontWeight = FontWeight.Bold, color = Teal)
+        if (sets.isEmpty()) Text("All settled")
+        sets.forEach { Text("${it.first}  →  ${it.second}:  ${money(it.third)}") }
+        Spacer(Modifier.height(8.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button({ pdf.launch("members_settlement.pdf") }, Modifier.weight(1f)) { Text("Export PDF") }
+            Button({ xls.launch("members_settlement.csv") }, Modifier.weight(1f)) { Text("Export Excel") }
         }
     }
 }
