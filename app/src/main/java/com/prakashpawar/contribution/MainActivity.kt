@@ -18,6 +18,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.painterResource
 import kotlin.math.abs
+import kotlin.math.ceil
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -61,7 +62,7 @@ class Store(private val ctx: Context) {
     val collectorSpent get() = if (collector.isEmpty()) 0.0 else paid(collector)
     val collectorCash get() = collected - collectorSpent   // negative = borrowed (collector's own money)
     fun cashLabel() = if (collectorCash >= 0) "Remaining with collector" else "Borrowed by collector"
-    val share get() = if (members.isEmpty()) 0.0 else totalExp / members.size
+    val share get() = if (members.isEmpty()) 0.0 else up(totalExp / members.size)   // equal share, rounded up
     fun paid(m: String) = exps.filter { it.member == m }.sumOf { it.amount }
     private fun isMember(n: String) = members.any { it.equals(n.trim(), true) }
     // balance > 0: should receive, < 0: should pay. Collections between members adjust it.
@@ -70,10 +71,10 @@ class Store(private val ctx: Context) {
         val recv = colls.filter { it.toWhom.trim().equals(m, true) && it.member != m }.sumOf { it.amount }
         return paid(m) + given - recv - share
     }
-    // Report columns: Difference = contributed + expense - equal share (collector: own expense only)
-    fun contributed(m: String) = if (m.equals(collector, true)) 0.0 else colls.filter { it.member == m }.sumOf { it.amount }
-    fun difference(m: String) = contributed(m) + paid(m) - share
-    fun stmtBalance(m: String) = totalExp - paid(m)
+    // Paid = member's expense; Difference = contributed + expense; Balance = equal share - Difference
+    fun contributed(m: String) = colls.filter { it.member == m }.sumOf { it.amount }
+    fun difference(m: String) = contributed(m) + paid(m)
+    fun stmtBalance(m: String) = share - difference(m)
     fun settlements(): List<Triple<String, String, Double>> {
         val deb = members.associateWith { -net(it) }.filter { it.value > 0.005 }.toMutableMap()
         val cre = members.associateWith { net(it) }.filter { it.value > 0.005 }.toMutableMap()
@@ -81,7 +82,7 @@ class Store(private val ctx: Context) {
         while (deb.isNotEmpty() && cre.isNotEmpty()) {
             val d = deb.maxByOrNull { it.value }!!; val c = cre.maxByOrNull { it.value }!!
             val a = minOf(d.value, c.value)
-            out.add(Triple(d.key, c.key, a))
+            out.add(Triple(d.key, c.key, up(a)))
             deb[d.key] = d.value - a; cre[c.key] = c.value - a
             if (deb[d.key]!! < 0.005) deb.remove(d.key)
             if (cre[c.key]!! < 0.005) cre.remove(c.key)
@@ -113,6 +114,7 @@ class Store(private val ctx: Context) {
     }
 }
 
+fun up(d: Double) = ceil(d - 1e-6)   // round up to whole rupee
 fun today(): String = SimpleDateFormat("dd-MM-yyyy", Locale.getDefault()).format(Date())
 fun money(d: Double) = (if (d < -0.004) "-" else "") + "₹" + String.format(Locale.getDefault(), "%.2f", abs(d))
 fun toast(c: Context, m: String) = Toast.makeText(c, m, Toast.LENGTH_SHORT).show()
@@ -182,7 +184,7 @@ fun writePdf(ctx: Context, uri: Uri, s: Store, settle: Boolean = false) {
         row(listOf("${s.cashLabel()}: ${money(abs(s.collectorCash))}"), bold = true); y += 8
         row(listOf("Member", "Paid", "Difference", "Balance"), bold = true)
         s.members.forEach { row(listOf(it, money(s.paid(it)), money(s.difference(it)), money(s.stmtBalance(it)))) }
-    row(listOf("Difference = contributed + expense - equal share")); row(listOf("Collector: only own expense counted")); row(listOf("Balance = total expense - paid"))
+    row(listOf("Paid = expense by member")); row(listOf("Difference = contributed + expense")); row(listOf("Balance = equal share - difference"))
         y += 8; row(listOf("Who gives -> To whom", "", "Amount"), bold = true)
         s.settlements().forEach { row(listOf("${it.first} -> ${it.second}", "", money(it.third))) }
         if (s.settlements().isEmpty()) row(listOf("All settled"))
@@ -207,7 +209,7 @@ fun writePdf(ctx: Context, uri: Uri, s: Store, settle: Boolean = false) {
     s.exps.forEach { row(listOf("${it.date} ${it.member}: ${it.category}", it.mode, money(it.amount))) }
     y += 8; row(listOf("Member", "Paid", "Difference", "Balance"), bold = true)
     s.members.forEach { row(listOf(it, money(s.paid(it)), money(s.difference(it)), money(s.stmtBalance(it)))) }
-    row(listOf("Difference = contributed + expense - equal share")); row(listOf("Collector: only own expense counted")); row(listOf("Balance = total expense - paid"))
+    row(listOf("Paid = expense by member")); row(listOf("Difference = contributed + expense")); row(listOf("Balance = equal share - difference"))
     y += 8; row(listOf("Who gives -> To whom", "", "Amount"), bold = true)
     s.settlements().forEach { row(listOf("${it.first} -> ${it.second}", "", money(it.third))) }
     y += 10; row(listOf("Thank you! Developed by Prakash Pawar"), bold = true); row(listOf("Contact: 9892399306"))
@@ -271,12 +273,22 @@ fun ExportRow(s: Store, settle: Boolean = false) {
 }
 
 @Composable
-fun StatCard(label: String, value: String, mod: Modifier, onClick: (() -> Unit)? = null) {
-    Card(if (onClick != null) mod.clickable { onClick() } else mod, colors = CardDefaults.cardColors(containerColor = Teal), shape = RoundedCornerShape(14.dp)) {
-        Column(Modifier.padding(10.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-            Text(label, color = Color.White, fontSize = 11.sp)
-            Text(value, color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+fun StatCard(label: String, value: String, mod: Modifier, neg: Boolean = false, onClick: (() -> Unit)? = null) {
+    val fg = if (neg) Color(0xFFB3261E) else Color.White
+    Card(if (onClick != null) mod.clickable { onClick() } else mod,
+        colors = CardDefaults.cardColors(containerColor = if (neg) Color(0xFFFDECEA) else Teal), shape = RoundedCornerShape(10.dp)) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 4.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+            Text(label, color = fg, fontSize = 10.sp, maxLines = 1)
+            Text(value, color = fg, fontSize = 14.sp, fontWeight = FontWeight.Bold, maxLines = 1)
         }
+    }
+}
+
+@Composable
+fun Bar(left: String, right: String, mod: Modifier = Modifier) {
+    Row(mod.fillMaxWidth().background(Teal, RoundedCornerShape(10.dp)).padding(horizontal = 10.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text(left, Modifier.weight(1f), color = Color.White, fontSize = 13.sp, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+        Text(right, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 15.sp, maxLines = 1)
     }
 }
 
@@ -284,28 +296,28 @@ fun StatCard(label: String, value: String, mod: Modifier, onClick: (() -> Unit)?
 fun MainPage(s: Store, go: (String) -> Unit, onExit: () -> Unit) {
     var showMembers by remember { mutableStateOf(false) }
     var showThanks by remember { mutableStateOf(false) }
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        Text("Contribution Manager", fontSize = 24.sp, fontWeight = FontWeight.Bold, color = Teal)
-        OutlinedTextField(s.title, { s.title = it; s.save() }, label = { Text("Contribution For") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            StatCard("Collection (${s.collector.ifEmpty { "No collector" }})", money(s.totalColl), Modifier.weight(1f))
+    val diff = s.totalColl - s.totalExp
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text("Contribution Manager", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Teal)
+        OutlinedTextField(s.title, { s.title = it; s.save() }, label = { Text("Contribution For") }, modifier = Modifier.fillMaxWidth(), singleLine = true,
+            textStyle = androidx.compose.ui.text.TextStyle(fontSize = 14.sp))
+        Bar("Collection (Collector: ${s.collector.ifEmpty { "none" }})", money(s.totalColl))
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             StatCard("Total Expenses", money(s.totalExp), Modifier.weight(1f))
-            StatCard("Difference", money(s.totalColl - s.totalExp), Modifier.weight(1f))
+            StatCard("Difference", money(diff), Modifier.weight(1f), neg = diff < -0.004)
+            StatCard("Share / Person", money(s.share), Modifier.weight(1f))
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            StatCard("Members ▸ (tap)", "${s.members.size}", Modifier.weight(1f)) { showMembers = true }
-            StatCard("Share / Person", money(s.share), Modifier.weight(2f))
+        Bar("Members (tap to view list)", "${s.members.size}", Modifier.clickable { showMembers = true })
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            Button({ go("member") }, Modifier.weight(1f)) { Text("Member Entry", fontSize = 13.sp) }
+            Button({ go("coll") }, Modifier.weight(1f)) { Text("Collection", fontSize = 13.sp) }
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button({ go("member") }, Modifier.weight(1f)) { Text("Member Entry") }
-            Button({ go("coll") }, Modifier.weight(1f)) { Text("Collection") }
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            Button({ go("exp") }, Modifier.weight(1f)) { Text("Expenses", fontSize = 13.sp) }
+            Button({ go("report") }, Modifier.weight(1f)) { Text("Report", fontSize = 13.sp) }
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button({ go("exp") }, Modifier.weight(1f)) { Text("Expenses") }
-            Button({ go("report") }, Modifier.weight(1f)) { Text("Report") }
-        }
-        Button({ go("settle") }, Modifier.fillMaxWidth()) { Text("Members List & Who Pays Whom") }
-        Button({ showThanks = true }, Modifier.fillMaxWidth(), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFB3261E))) { Text("Exit") }
+        Button({ go("settle") }, Modifier.fillMaxWidth()) { Text("Members List & Who Pays Whom", fontSize = 13.sp) }
+        Button({ showThanks = true }, Modifier.fillMaxWidth(), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFB3261E))) { Text("Exit", fontSize = 13.sp) }
         if (showThanks) AlertDialog(
             onDismissRequest = { showThanks = false },
             title = { Text("Thank You!") },
@@ -459,7 +471,7 @@ fun SettleScreen(s: Store) {
     Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Text("Total members: ${s.members.size}", fontWeight = FontWeight.Bold)
         Text("Total expense: ${money(s.totalExp)}")
-        Text("Equal share per person: ${money(s.share)}", fontWeight = FontWeight.Bold, color = Teal)
+        Text("Equal share per person (rounded up): ${money(s.share)}", fontWeight = FontWeight.Bold, color = Teal)
         Text("Collector: ${s.collector.ifEmpty { "-" }}   Collected: ${money(s.collected)}")
         Text("Expense paid by collector: ${money(s.collectorSpent)}")
         Text("${s.cashLabel()}: ${money(abs(s.collectorCash))}", fontWeight = FontWeight.Bold, color = if (s.collectorCash < 0) Color(0xFFB3261E) else Teal)
@@ -475,8 +487,8 @@ fun SettleScreen(s: Store) {
             }
         }
         Text("Paid = expense by member", fontSize = 11.sp)
-        Text("Difference = contributed + expense − equal share (collector: own expense only)", fontSize = 11.sp)
-        Text("Balance = total expense − paid", fontSize = 11.sp)
+        Text("Difference = contributed + expense (collector: money received is not counted)", fontSize = 11.sp)
+        Text("Balance = equal share − difference (minus = to receive)", fontSize = 11.sp)
         HorizontalDivider(Modifier.padding(vertical = 6.dp))
         Text("Who gives whom", fontWeight = FontWeight.Bold, color = Teal)
         if (sets.isEmpty()) Text("All settled")
