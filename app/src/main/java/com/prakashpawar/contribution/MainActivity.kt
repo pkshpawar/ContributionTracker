@@ -65,14 +65,18 @@ class Store(private val ctx: Context) {
     fun paid(m: String) = exps.filter { it.member == m }.sumOf { it.amount }
     private fun isMember(n: String) = members.any { it.equals(n.trim(), true) }
     // balance > 0: should receive, < 0: should pay. Collections between members adjust it.
-    fun balance(m: String): Double {
+    fun net(m: String): Double {
         val given = colls.filter { it.member == m && isMember(it.toWhom) && !it.toWhom.trim().equals(m, true) }.sumOf { it.amount }
         val recv = colls.filter { it.toWhom.trim().equals(m, true) && it.member != m }.sumOf { it.amount }
         return paid(m) + given - recv - share
     }
+    // Report columns: Difference = contributed + expense - equal share (collector: own expense only)
+    fun contributed(m: String) = if (m.equals(collector, true)) 0.0 else colls.filter { it.member == m }.sumOf { it.amount }
+    fun difference(m: String) = contributed(m) + paid(m) - share
+    fun stmtBalance(m: String) = totalExp - paid(m)
     fun settlements(): List<Triple<String, String, Double>> {
-        val deb = members.associateWith { -balance(it) }.filter { it.value > 0.005 }.toMutableMap()
-        val cre = members.associateWith { balance(it) }.filter { it.value > 0.005 }.toMutableMap()
+        val deb = members.associateWith { -net(it) }.filter { it.value > 0.005 }.toMutableMap()
+        val cre = members.associateWith { net(it) }.filter { it.value > 0.005 }.toMutableMap()
         val out = mutableListOf<Triple<String, String, Double>>()
         while (deb.isNotEmpty() && cre.isNotEmpty()) {
             val d = deb.maxByOrNull { it.value }!!; val c = cre.maxByOrNull { it.value }!!
@@ -110,7 +114,7 @@ class Store(private val ctx: Context) {
 }
 
 fun today(): String = SimpleDateFormat("dd-MM-yyyy", Locale.getDefault()).format(Date())
-fun money(d: Double) = "₹" + String.format(Locale.getDefault(), "%.2f", d)
+fun money(d: Double) = (if (d < -0.004) "-" else "") + "₹" + String.format(Locale.getDefault(), "%.2f", abs(d))
 fun toast(c: Context, m: String) = Toast.makeText(c, m, Toast.LENGTH_SHORT).show()
 
 fun write(ctx: Context, uri: Uri, text: String) =
@@ -131,8 +135,8 @@ fun csv(s: Store): String {
     b.appendLine(); b.appendLine("Expenses"); b.appendLine("Member,Date,Category,Mode,Description,Amount")
     s.exps.forEach { b.appendLine("${q(it.member)},${it.date},${q(it.category)},${it.mode},${q(it.desc)},${it.amount}") }
     b.appendLine(); b.appendLine("Difference (Collection - Expense),,${s.totalColl - s.totalExp}")
-    b.appendLine(); b.appendLine("Member,Paid,Share,Balance")
-    s.members.forEach { b.appendLine("${q(it)},${s.paid(it)},${s.share},${s.balance(it)}") }
+    b.appendLine(); b.appendLine("Member,Paid,Difference,Balance")
+    s.members.forEach { b.appendLine("${q(it)},${s.paid(it)},${s.difference(it)},${s.stmtBalance(it)}") }
     b.appendLine(); b.appendLine("Who Gives,To Whom,Amount")
     s.settlements().forEach { b.appendLine("${q(it.first)},${q(it.second)},${it.third}") }
     b.appendLine(); b.appendLine("Thank you! Developed by Prakash Pawar,Contact: 9892399306")
@@ -145,8 +149,8 @@ fun csvSettle(s: Store): String {
     b.appendLine(q("Members Report: " + s.title))
     b.appendLine("Total Members,${s.members.size}"); b.appendLine("Total Expense,${s.totalExp}"); b.appendLine("Equal Share Per Person,${s.share}")
     b.appendLine("Collector,${q(s.collector)}"); b.appendLine("Collected,${s.collected}"); b.appendLine("Expense Paid By Collector,${s.collectorSpent}"); b.appendLine("${s.cashLabel()},${abs(s.collectorCash)}")
-    b.appendLine(); b.appendLine("Member,Paid,Share,Balance")
-    s.members.forEach { b.appendLine("${q(it)},${s.paid(it)},${s.share},${s.balance(it)}") }
+    b.appendLine(); b.appendLine("Member,Paid,Difference,Balance")
+    s.members.forEach { b.appendLine("${q(it)},${s.paid(it)},${s.difference(it)},${s.stmtBalance(it)}") }
     b.appendLine(); b.appendLine("Who Gives,To Whom,Amount")
     s.settlements().forEach { b.appendLine("${q(it.first)},${q(it.second)},${it.third}") }
     b.appendLine(); b.appendLine("Thank you! Developed by Prakash Pawar,Contact: 9892399306")
@@ -160,7 +164,11 @@ fun writePdf(ctx: Context, uri: Uri, s: Store, settle: Boolean = false) {
     fun row(cols: List<String>, size: Float = 11f, bold: Boolean = false) {
         if (y > 790) { doc.finishPage(page); n++; page = doc.startPage(PdfDocument.PageInfo.Builder(595, 842, n).create()); y = 50f }
         p.textSize = size; p.isFakeBoldText = bold
-        listOf(40f, 340f, 430f).forEachIndexed { i, x -> cols.getOrNull(i)?.let { page.canvas.drawText(it.take(if (i == 0) 48 else 14), x, y, p) } }
+        val xs = if (cols.size == 4) listOf(40f, 220f, 330f, 440f) else listOf(40f, 340f, 430f)
+        xs.forEachIndexed { i, x -> cols.getOrNull(i)?.let { c ->
+            p.color = if (c.startsWith("-₹")) android.graphics.Color.RED else android.graphics.Color.BLACK
+            page.canvas.drawText(c.take(if (i == 0) (if (cols.size == 4) 26 else 48) else 14), x, y, p) } }
+        p.color = android.graphics.Color.BLACK
         y += size + 8
     }
     row(listOf(s.title.ifBlank { "Contribution Information" }), 18f, true)
@@ -172,8 +180,9 @@ fun writePdf(ctx: Context, uri: Uri, s: Store, settle: Boolean = false) {
         row(listOf("Collector: ${s.collector.ifEmpty { "-" }}   Collected: ${money(s.collected)}"), bold = true)
         row(listOf("Expense by collector: ${money(s.collectorSpent)}"), bold = true)
         row(listOf("${s.cashLabel()}: ${money(abs(s.collectorCash))}"), bold = true); y += 8
-        row(listOf("Member", "Paid", "Balance"), bold = true)
-        s.members.forEach { row(listOf(it, money(s.paid(it)), money(s.balance(it)))) }
+        row(listOf("Member", "Paid", "Difference", "Balance"), bold = true)
+        s.members.forEach { row(listOf(it, money(s.paid(it)), money(s.difference(it)), money(s.stmtBalance(it)))) }
+    row(listOf("Difference = contributed + expense - equal share")); row(listOf("Collector: only own expense counted")); row(listOf("Balance = total expense - paid"))
         y += 8; row(listOf("Who gives -> To whom", "", "Amount"), bold = true)
         s.settlements().forEach { row(listOf("${it.first} -> ${it.second}", "", money(it.third))) }
         if (s.settlements().isEmpty()) row(listOf("All settled"))
@@ -196,8 +205,9 @@ fun writePdf(ctx: Context, uri: Uri, s: Store, settle: Boolean = false) {
     s.colls.forEach { row(listOf("${it.member} -> ${it.toWhom}", "", money(it.amount))) }
     y += 8; row(listOf("Expense details (date, member, category)", "Mode", "Amount"), bold = true)
     s.exps.forEach { row(listOf("${it.date} ${it.member}: ${it.category}", it.mode, money(it.amount))) }
-    y += 8; row(listOf("Member", "Paid", "Balance"), bold = true)
-    s.members.forEach { row(listOf(it, money(s.paid(it)), money(s.balance(it)))) }
+    y += 8; row(listOf("Member", "Paid", "Difference", "Balance"), bold = true)
+    s.members.forEach { row(listOf(it, money(s.paid(it)), money(s.difference(it)), money(s.stmtBalance(it)))) }
+    row(listOf("Difference = contributed + expense - equal share")); row(listOf("Collector: only own expense counted")); row(listOf("Balance = total expense - paid"))
     y += 8; row(listOf("Who gives -> To whom", "", "Amount"), bold = true)
     s.settlements().forEach { row(listOf("${it.first} -> ${it.second}", "", money(it.third))) }
     y += 10; row(listOf("Thank you! Developed by Prakash Pawar"), bold = true); row(listOf("Contact: 9892399306"))
@@ -381,7 +391,7 @@ fun CollScreen(s: Store) {
                 Text("$member gave (+ added): ${money(given)}", color = Color.White)
                 Text("$member received (− subtracted): ${money(recv)}", color = Color.White)
                 Text("Net: ${money(given - recv)}", color = Color.White, fontWeight = FontWeight.Bold)
-                Text("Balance after expense share: ${money(s.balance(member))}", color = Color.White, fontSize = 12.sp)
+                Text("Difference: ${money(s.difference(member))}", color = Color.White, fontSize = 12.sp)
             }
         }
         s.colls.filter { member.isEmpty() || it.member == member || it.toWhom == member }.forEach { c ->
@@ -454,11 +464,19 @@ fun SettleScreen(s: Store) {
         Text("Expense paid by collector: ${money(s.collectorSpent)}")
         Text("${s.cashLabel()}: ${money(abs(s.collectorCash))}", fontWeight = FontWeight.Bold, color = if (s.collectorCash < 0) Color(0xFFB3261E) else Teal)
         Spacer(Modifier.height(6.dp))
-        Row(Modifier.fillMaxWidth()) { Text("Member", Modifier.weight(2f), fontWeight = FontWeight.Bold); Text("Paid", Modifier.weight(1.5f), fontWeight = FontWeight.Bold); Text("Balance", Modifier.weight(1.5f), fontWeight = FontWeight.Bold) }
-        s.members.forEach { m ->
-            Row(Modifier.fillMaxWidth()) { Text(m, Modifier.weight(2f)); Text(money(s.paid(m)), Modifier.weight(1.5f), fontSize = 13.sp); Text(money(s.balance(m)), Modifier.weight(1.5f), fontSize = 13.sp) }
+        Row(Modifier.fillMaxWidth()) {
+            Text("Member", Modifier.weight(1.8f), fontWeight = FontWeight.Bold, fontSize = 12.sp); Text("Paid", Modifier.weight(1.3f), fontWeight = FontWeight.Bold, fontSize = 12.sp)
+            Text("Difference", Modifier.weight(1.5f), fontWeight = FontWeight.Bold, fontSize = 12.sp); Text("Balance", Modifier.weight(1.5f), fontWeight = FontWeight.Bold, fontSize = 12.sp)
         }
-        Text("Balance: + will receive, − will pay", fontSize = 11.sp)
+        s.members.forEach { m ->
+            Row(Modifier.fillMaxWidth()) {
+                Text(m, Modifier.weight(1.8f), fontSize = 12.sp)
+                Amt(s.paid(m), Modifier.weight(1.3f)); Amt(s.difference(m), Modifier.weight(1.5f)); Amt(s.stmtBalance(m), Modifier.weight(1.5f))
+            }
+        }
+        Text("Paid = expense by member", fontSize = 11.sp)
+        Text("Difference = contributed + expense − equal share (collector: own expense only)", fontSize = 11.sp)
+        Text("Balance = total expense − paid", fontSize = 11.sp)
         HorizontalDivider(Modifier.padding(vertical = 6.dp))
         Text("Who gives whom", fontWeight = FontWeight.Bold, color = Teal)
         if (sets.isEmpty()) Text("All settled")
@@ -467,3 +485,7 @@ fun SettleScreen(s: Store) {
         ExportRow(s, true)
     }
 }
+
+@Composable
+fun Amt(v: Double, mod: Modifier) =
+    Text(money(v), mod, fontSize = 12.sp, color = if (v < -0.004) Color(0xFFB3261E) else Color.Unspecified)
