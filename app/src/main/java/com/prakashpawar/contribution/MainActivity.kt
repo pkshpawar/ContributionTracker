@@ -13,6 +13,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -45,6 +46,7 @@ data class Exp(val member: String, val date: String, val category: String, val m
 
 class Store(private val ctx: Context) {
     var title by mutableStateOf("")
+    var collector by mutableStateOf("")
     val members = mutableStateListOf<String>()
     val colls = mutableStateListOf<Coll>()
     val exps = mutableStateListOf<Exp>()
@@ -83,13 +85,14 @@ class Store(private val ctx: Context) {
 
     fun toJson() = JSONObject().apply {
         put("title", title)
+        put("collector", collector)
         put("members", JSONArray(members))
         put("collections", JSONArray().also { a -> colls.forEach { a.put(JSONObject().put("member", it.member).put("toWhom", it.toWhom).put("amount", it.amount)) } })
         put("expenses", JSONArray().also { a -> exps.forEach { a.put(JSONObject().put("member", it.member).put("date", it.date).put("category", it.category).put("mode", it.mode).put("desc", it.desc).put("amount", it.amount)) } })
     }
 
     fun fromJson(j: JSONObject) {
-        title = j.optString("title"); members.clear(); colls.clear(); exps.clear()
+        title = j.optString("title"); collector = j.optString("collector"); members.clear(); colls.clear(); exps.clear()
         j.optJSONArray("members")?.let { for (i in 0 until it.length()) members.add(it.getString(i)) }
         j.optJSONArray("collections")?.let { for (i in 0 until it.length()) it.getJSONObject(i).let { o -> colls.add(Coll(o.getString("member"), o.getString("toWhom"), o.getDouble("amount"))) } }
         j.optJSONArray("expenses")?.let { for (i in 0 until it.length()) it.getJSONObject(i).let { o -> exps.add(Exp(o.getString("member"), o.getString("date"), o.getString("category"), o.getString("mode"), o.getString("desc"), o.getDouble("amount"))) } }
@@ -185,7 +188,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val store = Store(this)
-        setContent { MaterialTheme(colorScheme = lightColorScheme(primary = Teal)) { App(store) { finishAffinity() } } }
+        setContent { MaterialTheme(colorScheme = lightColorScheme(primary = Teal)) { App(store) { finishAndRemoveTask() } } }
     }
 }
 
@@ -236,8 +239,8 @@ fun ExportRow(s: Store, settle: Boolean = false) {
 }
 
 @Composable
-fun StatCard(label: String, value: String, mod: Modifier) {
-    Card(mod, colors = CardDefaults.cardColors(containerColor = Teal), shape = RoundedCornerShape(14.dp)) {
+fun StatCard(label: String, value: String, mod: Modifier, onClick: (() -> Unit)? = null) {
+    Card(if (onClick != null) mod.clickable { onClick() } else mod, colors = CardDefaults.cardColors(containerColor = Teal), shape = RoundedCornerShape(14.dp)) {
         Column(Modifier.padding(10.dp), horizontalAlignment = Alignment.CenterHorizontally) {
             Text(label, color = Color.White, fontSize = 11.sp)
             Text(value, color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold)
@@ -247,21 +250,17 @@ fun StatCard(label: String, value: String, mod: Modifier) {
 
 @Composable
 fun MainPage(s: Store, go: (String) -> Unit, onExit: () -> Unit) {
-    val ctx = LocalContext.current
-    val exportJson = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { u ->
-        u?.let { write(ctx, it, s.toJson().toString(2)); toast(ctx, "Backup saved") } }
-    val importJson = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { u ->
-        u?.let { runCatching { s.fromJson(JSONObject(ctx.contentResolver.openInputStream(it)!!.bufferedReader().readText())); toast(ctx, "Imported") }.onFailure { toast(ctx, "Invalid file") } } }
+    var showMembers by remember { mutableStateOf(false) }
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Text("Contribution Manager", fontSize = 24.sp, fontWeight = FontWeight.Bold, color = Teal)
         OutlinedTextField(s.title, { s.title = it; s.save() }, label = { Text("Contribution For") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            StatCard("Total Collection", money(s.totalColl), Modifier.weight(1f))
+            StatCard("Collection (${s.collector.ifEmpty { "No collector" }})", money(s.totalColl), Modifier.weight(1f))
             StatCard("Total Expenses", money(s.totalExp), Modifier.weight(1f))
             StatCard("Difference", money(s.totalColl - s.totalExp), Modifier.weight(1f))
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            StatCard("Members", "${s.members.size}", Modifier.weight(1f))
+            StatCard("Members ▸ (tap)", "${s.members.size}", Modifier.weight(1f)) { showMembers = true }
             StatCard("Share / Person", money(s.share), Modifier.weight(2f))
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -273,11 +272,14 @@ fun MainPage(s: Store, go: (String) -> Unit, onExit: () -> Unit) {
             Button({ go("report") }, Modifier.weight(1f)) { Text("Report") }
         }
         Button({ go("settle") }, Modifier.fillMaxWidth()) { Text("Members List & Who Pays Whom") }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedButton({ exportJson.launch("contribution_backup.json") }, Modifier.weight(1f)) { Text("Export & Save") }
-            OutlinedButton({ importJson.launch(arrayOf("*/*")) }, Modifier.weight(1f)) { Text("Import") }
-        }
         Button(onExit, Modifier.fillMaxWidth(), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFB3261E))) { Text("Exit") }
+        if (showMembers) AlertDialog(
+            onDismissRequest = { showMembers = false },
+            title = { Text("Members (${s.members.size})") },
+            text = { Column(Modifier.verticalScroll(rememberScrollState())) {
+                if (s.members.isEmpty()) Text("No members yet")
+                s.members.forEachIndexed { i, m -> Text("${i + 1}. $m" + if (m == s.collector) "  (Collector)" else "") } } },
+            confirmButton = { TextButton({ showMembers = false }) { Text("Close") } })
     }
 }
 
@@ -293,28 +295,40 @@ fun Drop(label: String, options: List<String>, sel: String, onSel: (String) -> U
 @Composable
 fun MemberScreen(s: Store) {
     var name by remember { mutableStateOf("") }
+    var del by remember { mutableStateOf<String?>(null) }
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("Total members: ${s.members.size}", fontWeight = FontWeight.Bold, color = Teal)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
             OutlinedTextField(name, { name = it }, label = { Text("Member name") }, modifier = Modifier.weight(1f), singleLine = true)
             Button({ val n = name.trim(); if (n.isNotEmpty() && n !in s.members) { s.members.add(n); s.save(); name = "" } }) { Text("Add") }
         }
+        Drop("Money Collector", s.members, s.collector) { s.collector = it; s.save() }
+        Text(if (s.collector.isEmpty()) "Select one collector (can be yourself)" else "Collector: ${s.collector}", fontSize = 12.sp)
         LazyColumn { items(s.members.toList()) { m ->
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                Text(m); TextButton({ s.members.remove(m); s.save() }) { Text("Delete") } } } }
+                Text(m + if (m == s.collector) "  (Collector)" else "")
+                TextButton({ del = m }) { Text("Delete") } } } }
+    }
+    del?.let { m ->
+        AlertDialog(
+            onDismissRequest = { del = null },
+            title = { Text("Remove member") },
+            text = { Text("Do you want to remove $m?") },
+            confirmButton = { TextButton({ s.members.remove(m); if (s.collector == m) s.collector = ""; s.save(); del = null }) { Text("Remove") } },
+            dismissButton = { TextButton({ del = null }) { Text("No") } })
     }
 }
 
 @Composable
 fun CollScreen(s: Store) {
-    var member by remember { mutableStateOf("") }; var to by remember { mutableStateOf("") }; var amt by remember { mutableStateOf("") }
+    var member by remember { mutableStateOf("") }; var amt by remember { mutableStateOf("") }
     Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Drop("Who gives", s.members, member) { member = it; if (to == it) to = "" }
-        Drop("To whom", s.members.filter { it != member }, to) { to = it }
+        Text("Money Collector: ${s.collector.ifEmpty { "not selected (set in Member Entry)" }}", fontWeight = FontWeight.Bold, color = Teal)
+        Drop("Who gives (collector may give too)", s.members, member) { member = it }
         OutlinedTextField(amt, { amt = it }, label = { Text("Amount") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
         Button({
             val a = amt.toDoubleOrNull()
-            if (member.isNotEmpty() && to.isNotEmpty() && a != null && a > 0) { s.colls.add(Coll(member, to, a)); s.save(); amt = "" }
+            if (member.isNotEmpty() && s.collector.isNotEmpty() && a != null && a > 0) { s.colls.add(Coll(member, s.collector, a)); s.save(); amt = "" }
         }, Modifier.fillMaxWidth()) { Text("Add Collection") }
         if (member.isNotEmpty()) {
             val given = s.colls.filter { it.member == member }.sumOf { it.amount }
@@ -331,14 +345,14 @@ fun CollScreen(s: Store) {
                 Text("${c.member} → ${c.toWhom}: ${money(c.amount)}", Modifier.weight(1f), fontSize = 14.sp)
                 TextButton({ s.colls.remove(c); s.save() }) { Text("✕") } }
         }
-        Text("Total collection: ${money(s.totalColl)}", fontWeight = FontWeight.Bold)
+        Text("Total collection (Collector: ${s.collector.ifEmpty { "-" }}): ${money(s.totalColl)}", fontWeight = FontWeight.Bold)
         ExportRow(s)
     }
 }
 
 @Composable
 fun ExpScreen(s: Store) {
-    var member by remember { mutableStateOf("") }; var date by remember { mutableStateOf(today()) }
+    var member by remember { mutableStateOf(s.collector) }; var date by remember { mutableStateOf(today()) }
     var cat by remember { mutableStateOf("") }; var mode by remember { mutableStateOf("") }
     var desc by remember { mutableStateOf("") }; var amt by remember { mutableStateOf("") }
     Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
