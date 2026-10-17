@@ -8,6 +8,7 @@ import android.net.Uri
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -110,12 +111,17 @@ fun csv(s: Store): String {
     b.appendLine(); b.appendLine("Category,Entries,Total")
     CATEGORIES.forEach { c -> val l = s.exps.filter { it.category == c }; b.appendLine("${q(c)},${l.size},${l.sumOf { it.amount }}") }
     b.appendLine("Total Expenses,,${s.totalExp}")
-    b.appendLine(); b.appendLine("Collections"); b.appendLine("Member,To Whom,Amount")
+    b.appendLine("Total Members,,${s.members.size}"); b.appendLine("Equal Share Per Person,,${s.share}")
+    b.appendLine(); b.appendLine("Collections"); b.appendLine("Who Gave,To Whom,Amount")
     s.colls.forEach { b.appendLine("${q(it.member)},${q(it.toWhom)},${it.amount}") }
     b.appendLine("Total Collection,,${s.totalColl}")
     b.appendLine(); b.appendLine("Expenses"); b.appendLine("Member,Date,Category,Mode,Description,Amount")
     s.exps.forEach { b.appendLine("${q(it.member)},${it.date},${q(it.category)},${it.mode},${q(it.desc)},${it.amount}") }
     b.appendLine(); b.appendLine("Difference (Collection - Expense),,${s.totalColl - s.totalExp}")
+    b.appendLine(); b.appendLine("Member,Paid,Share,Balance")
+    s.members.forEach { b.appendLine("${q(it)},${s.paid(it)},${s.share},${s.balance(it)}") }
+    b.appendLine(); b.appendLine("Who Gives,To Whom,Amount")
+    s.settlements().forEach { b.appendLine("${q(it.first)},${q(it.second)},${it.third}") }
     return b.toString()
 }
 
@@ -160,9 +166,16 @@ fun writePdf(ctx: Context, uri: Uri, s: Store, settle: Boolean = false) {
     CATEGORIES.forEach { c -> val l = s.exps.filter { it.category == c }; row(listOf(c, "${l.size}", money(l.sumOf { it.amount }))) }
     row(listOf("Total Expenses", "", money(s.totalExp)), bold = true); y += 8
     row(listOf("Total Collection", "", money(s.totalColl)), bold = true)
-    row(listOf("Difference", "", money(s.totalColl - s.totalExp)), bold = true); y += 8
-    row(listOf("Collection by member", "To whom", "Amount"), bold = true)
-    s.colls.forEach { row(listOf(it.member, it.toWhom, money(it.amount))) }
+    row(listOf("Difference", "", money(s.totalColl - s.totalExp)), bold = true)
+    row(listOf("Total Members: ${s.members.size}   Equal share per person: ${money(s.share)}"), bold = true); y += 8
+    row(listOf("Collections (who gave -> to whom)", "", "Amount"), bold = true)
+    s.colls.forEach { row(listOf("${it.member} -> ${it.toWhom}", "", money(it.amount))) }
+    y += 8; row(listOf("Expense details (date, member, category)", "Mode", "Amount"), bold = true)
+    s.exps.forEach { row(listOf("${it.date} ${it.member}: ${it.category}", it.mode, money(it.amount))) }
+    y += 8; row(listOf("Member", "Paid", "Balance"), bold = true)
+    s.members.forEach { row(listOf(it, money(s.paid(it)), money(s.balance(it)))) }
+    y += 8; row(listOf("Who gives -> To whom", "", "Amount"), bold = true)
+    s.settlements().forEach { row(listOf("${it.first} -> ${it.second}", "", money(it.third))) }
     doc.finishPage(page)
     ctx.contentResolver.openOutputStream(uri)?.use { doc.writeTo(it) }
     doc.close()
@@ -197,12 +210,28 @@ fun App(s: Store, onExit: () -> Unit) {
 
 @Composable
 fun Scaffold1(title: String, back: () -> Unit, content: @Composable () -> Unit) {
+    BackHandler(onBack = back)
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth().background(Teal).padding(horizontal = 8.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
             TextButton(onClick = back) { Text("← Back", color = Color.White) }
             Text(title, color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
         }
-        Box(Modifier.padding(12.dp)) { content() }
+        Box(Modifier.weight(1f).padding(12.dp)) { content() }
+        OutlinedButton(back, Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp)) { Text("Back") }
+    }
+}
+
+@Composable
+fun ExportRow(s: Store, settle: Boolean = false) {
+    val ctx = LocalContext.current
+    val name = if (settle) "members_settlement" else "contribution_report"
+    val pdf = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/pdf")) { u ->
+        u?.let { runCatching { writePdf(ctx, it, s, settle); toast(ctx, "PDF saved") }.onFailure { toast(ctx, "PDF failed") } } }
+    val xls = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/csv")) { u ->
+        u?.let { write(ctx, it, if (settle) csvSettle(s) else csv(s)); toast(ctx, "Excel saved") } }
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Button({ pdf.launch("$name.pdf") }, Modifier.weight(1f)) { Text("Export PDF") }
+        Button({ xls.launch("$name.csv") }, Modifier.weight(1f)) { Text("Export Excel") }
     }
 }
 
@@ -279,17 +308,31 @@ fun MemberScreen(s: Store) {
 @Composable
 fun CollScreen(s: Store) {
     var member by remember { mutableStateOf("") }; var to by remember { mutableStateOf("") }; var amt by remember { mutableStateOf("") }
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Drop("Member", s.members, member) { member = it }
-        OutlinedTextField(to, { to = it }, label = { Text("To whom") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
+    Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Drop("Who gives", s.members, member) { member = it; if (to == it) to = "" }
+        Drop("To whom", s.members.filter { it != member }, to) { to = it }
         OutlinedTextField(amt, { amt = it }, label = { Text("Amount") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
-        Button({ val a = amt.toDoubleOrNull(); if (member.isNotEmpty() && a != null) { s.colls.add(Coll(member, to.trim(), a)); s.save(); amt = "" } }, Modifier.fillMaxWidth()) { Text("Add Collection") }
-        val list = s.colls.filter { member.isEmpty() || it.member == member }
-        LazyColumn(Modifier.weight(1f, false).heightIn(max = 380.dp)) { items(list) { c ->
+        Button({
+            val a = amt.toDoubleOrNull()
+            if (member.isNotEmpty() && to.isNotEmpty() && a != null && a > 0) { s.colls.add(Coll(member, to, a)); s.save(); amt = "" }
+        }, Modifier.fillMaxWidth()) { Text("Add Collection") }
+        if (member.isNotEmpty()) {
+            val given = s.colls.filter { it.member == member }.sumOf { it.amount }
+            val recv = s.colls.filter { it.toWhom == member }.sumOf { it.amount }
+            Column(Modifier.fillMaxWidth().background(Teal, RoundedCornerShape(8.dp)).padding(10.dp)) {
+                Text("$member gave (+ added): ${money(given)}", color = Color.White)
+                Text("$member received (− subtracted): ${money(recv)}", color = Color.White)
+                Text("Net: ${money(given - recv)}", color = Color.White, fontWeight = FontWeight.Bold)
+                Text("Balance after expense share: ${money(s.balance(member))}", color = Color.White, fontSize = 12.sp)
+            }
+        }
+        s.colls.filter { member.isEmpty() || it.member == member || it.toWhom == member }.forEach { c ->
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                 Text("${c.member} → ${c.toWhom}: ${money(c.amount)}", Modifier.weight(1f), fontSize = 14.sp)
-                TextButton({ s.colls.remove(c); s.save() }) { Text("✕") } } } }
-        Text("Total (${member.ifEmpty { "all" }}): ${money(list.sumOf { it.amount })}", fontWeight = FontWeight.Bold)
+                TextButton({ s.colls.remove(c); s.save() }) { Text("✕") } }
+        }
+        Text("Total collection: ${money(s.totalColl)}", fontWeight = FontWeight.Bold)
+        ExportRow(s)
     }
 }
 
@@ -312,6 +355,7 @@ fun ExpScreen(s: Store) {
                     s.exps.add(Exp(member, date, cat, mode.ifEmpty { "Cash" }, desc.trim(), a)); s.save(); amt = ""; desc = ""
                 }
             }, Modifier.fillMaxWidth()) { Text("Add Expense") }
+            ExportRow(s)
             s.exps.filter { member.isEmpty() || it.member == member }.takeLast(15).reversed().forEach { e ->
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                     Text("${e.date} • ${e.category.take(18)} • ${e.mode} • ${money(e.amount)}", Modifier.weight(1f), fontSize = 12.sp)
@@ -325,11 +369,6 @@ fun ExpScreen(s: Store) {
 
 @Composable
 fun ReportScreen(s: Store) {
-    val ctx = LocalContext.current
-    val pdf = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/pdf")) { u ->
-        u?.let { runCatching { writePdf(ctx, it, s); toast(ctx, "PDF saved") }.onFailure { toast(ctx, "PDF failed") } } }
-    val xls = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/csv")) { u ->
-        u?.let { write(ctx, it, csv(s)); toast(ctx, "Excel (CSV) saved") } }
     Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Text(s.title.ifBlank { "Contribution Information" }, fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Teal)
         Row(Modifier.fillMaxWidth()) { Text("Category", Modifier.weight(3f), fontWeight = FontWeight.Bold); Text("Qty", Modifier.weight(1f), fontWeight = FontWeight.Bold); Text("Total", Modifier.weight(1.5f), fontWeight = FontWeight.Bold) }
@@ -342,20 +381,12 @@ fun ReportScreen(s: Store) {
         Text("Total Collection: ${money(s.totalColl)}", fontWeight = FontWeight.Bold)
         Text("Difference: ${money(s.totalColl - s.totalExp)}", fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(8.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button({ pdf.launch("contribution_report.pdf") }, Modifier.weight(1f)) { Text("Export PDF") }
-            Button({ xls.launch("contribution_report.csv") }, Modifier.weight(1f)) { Text("Export Excel") }
-        }
+        ExportRow(s)
     }
 }
 
 @Composable
 fun SettleScreen(s: Store) {
-    val ctx = LocalContext.current
-    val pdf = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/pdf")) { u ->
-        u?.let { runCatching { writePdf(ctx, it, s, true); toast(ctx, "PDF saved") }.onFailure { toast(ctx, "PDF failed") } } }
-    val xls = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/csv")) { u ->
-        u?.let { write(ctx, it, csvSettle(s)); toast(ctx, "Excel (CSV) saved") } }
     val sets = s.settlements()
     Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Text("Total members: ${s.members.size}", fontWeight = FontWeight.Bold)
@@ -372,9 +403,6 @@ fun SettleScreen(s: Store) {
         if (sets.isEmpty()) Text("All settled")
         sets.forEach { Text("${it.first}  →  ${it.second}:  ${money(it.third)}") }
         Spacer(Modifier.height(8.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button({ pdf.launch("members_settlement.pdf") }, Modifier.weight(1f)) { Text("Export PDF") }
-            Button({ xls.launch("members_settlement.csv") }, Modifier.weight(1f)) { Text("Export Excel") }
-        }
+        ExportRow(s, true)
     }
 }
