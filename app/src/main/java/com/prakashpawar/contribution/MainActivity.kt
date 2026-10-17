@@ -278,8 +278,8 @@ fun StatCard(label: String, value: String, mod: Modifier, neg: Boolean = false, 
     Card(if (onClick != null) mod.clickable { onClick() } else mod,
         colors = CardDefaults.cardColors(containerColor = if (neg) Color(0xFFFDECEA) else Teal), shape = RoundedCornerShape(10.dp)) {
         Column(Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 4.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-            Text(label, color = fg, fontSize = 10.sp, maxLines = 1)
-            Text(value, color = fg, fontSize = 14.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+            Text(label, color = fg, fontSize = 10.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+            Text(value, color = fg, fontSize = 15.sp, fontWeight = FontWeight.ExtraBold, maxLines = 1)
         }
     }
 }
@@ -296,11 +296,20 @@ fun Bar(left: String, right: String, mod: Modifier = Modifier) {
 fun MainPage(s: Store, go: (String) -> Unit, onExit: () -> Unit) {
     var showMembers by remember { mutableStateOf(false) }
     var showThanks by remember { mutableStateOf(false) }
+    var editing by remember { mutableStateOf(s.title.isBlank()) }   // locks after leaving the page
+    val nav: (String) -> Unit = { editing = false; go(it) }
     val diff = s.totalColl - s.totalExp
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Text("Contribution Manager", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Teal)
-        OutlinedTextField(s.title, { s.title = it; s.save() }, label = { Text("Contribution For") }, modifier = Modifier.fillMaxWidth(), singleLine = true,
-            textStyle = androidx.compose.ui.text.TextStyle(fontSize = 14.sp))
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            if (editing) OutlinedTextField(s.title, { s.title = it; s.save() }, label = { Text("Contribution For") }, modifier = Modifier.weight(1f), singleLine = true,
+                textStyle = androidx.compose.ui.text.TextStyle(fontSize = 14.sp, fontWeight = FontWeight.Bold))
+            else Column(Modifier.weight(1f)) {
+                Text("Contribution For", fontSize = 10.sp, color = Teal)
+                Text(s.title, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+            }
+            Button({ if (editing) { if (s.title.isNotBlank()) editing = false } else editing = true }) { Text(if (editing) "Save" else "Edit", fontSize = 13.sp) }
+        }
         Bar("Collection (Collector: ${s.collector.ifEmpty { "none" }})", money(s.totalColl))
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             StatCard("Total Expenses", money(s.totalExp), Modifier.weight(1f))
@@ -309,15 +318,15 @@ fun MainPage(s: Store, go: (String) -> Unit, onExit: () -> Unit) {
         }
         Bar("Members (tap to view list)", "${s.members.size}", Modifier.clickable { showMembers = true })
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            Button({ go("member") }, Modifier.weight(1f)) { Text("Member Entry", fontSize = 13.sp) }
-            Button({ go("coll") }, Modifier.weight(1f)) { Text("Collection", fontSize = 13.sp) }
+            Button({ nav("coll") }, Modifier.weight(1f)) { Text("Collection", fontSize = 13.sp) }
+            Button({ nav("exp") }, Modifier.weight(1f)) { Text("Expenses", fontSize = 13.sp) }
         }
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            Button({ go("exp") }, Modifier.weight(1f)) { Text("Expenses", fontSize = 13.sp) }
-            Button({ go("report") }, Modifier.weight(1f)) { Text("Report", fontSize = 13.sp) }
+            Button({ nav("member") }, Modifier.weight(1f)) { Text("Member Entry", fontSize = 13.sp) }
+            Button({ nav("report") }, Modifier.weight(1f)) { Text("Report", fontSize = 13.sp) }
         }
-        Button({ go("settle") }, Modifier.fillMaxWidth()) { Text("Members List & Who Pays Whom", fontSize = 13.sp) }
-        Button({ showThanks = true }, Modifier.fillMaxWidth(), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFB3261E))) { Text("Exit", fontSize = 13.sp) }
+        Button({ nav("settle") }, Modifier.fillMaxWidth()) { Text("Members List & Who Pays Whom", fontSize = 13.sp) }
+        Button({ editing = false; showThanks = true }, Modifier.fillMaxWidth(), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFB3261E))) { Text("Exit", fontSize = 13.sp) }
         if (showThanks) AlertDialog(
             onDismissRequest = { showThanks = false },
             title = { Text("Thank You!") },
@@ -334,7 +343,7 @@ fun MainPage(s: Store, go: (String) -> Unit, onExit: () -> Unit) {
             title = { Text("Members (${s.members.size})") },
             text = { Column(Modifier.verticalScroll(rememberScrollState())) {
                 if (s.members.isEmpty()) Text("No members yet")
-                s.members.forEachIndexed { i, m -> Text("${i + 1}. $m" + if (m == s.collector) "  (Collector)" else "") } } },
+                s.members.forEachIndexed { i, m -> Text("${i + 1}. $m" + if (m == s.collector) "  (Collector)" else "", fontSize = 18.sp, modifier = Modifier.padding(vertical = 2.dp)) } } },
             confirmButton = { TextButton({ showMembers = false }) { Text("Close") } })
     }
 }
@@ -344,7 +353,7 @@ fun Drop(label: String, options: List<String>, sel: String, onSel: (String) -> U
     var open by remember { mutableStateOf(false) }
     Box {
         OutlinedButton({ open = true }, Modifier.fillMaxWidth()) { Text(if (sel.isEmpty()) "Select $label" else "$label: $sel", maxLines = 1) }
-        DropdownMenu(open, { open = false }) { options.forEach { DropdownMenuItem({ Text(it) }, { onSel(it); open = false }) } }
+        DropdownMenu(open, { open = false }) { options.forEach { DropdownMenuItem({ Text(it, fontSize = 16.sp) }, { onSel(it); open = false }) } }
     }
 }
 
@@ -362,7 +371,7 @@ fun MemberScreen(s: Store) {
         Text(if (s.collector.isEmpty()) "Select one collector (can be yourself)" else "Collector: ${s.collector}", fontSize = 12.sp)
         LazyColumn { items(s.members.toList()) { m ->
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                Text(m + if (m == s.collector) "  (Collector)" else "")
+                Text(m + if (m == s.collector) "  (Collector)" else "", fontSize = 18.sp)
                 TextButton({ del = m }) { Text("Delete") } } } }
     }
     del?.let { m ->
