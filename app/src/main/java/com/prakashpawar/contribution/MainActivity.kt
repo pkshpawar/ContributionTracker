@@ -12,7 +12,12 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.painterResource
+import kotlin.math.abs
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -52,6 +57,10 @@ class Store(private val ctx: Context) {
     val exps = mutableStateListOf<Exp>()
     val totalColl get() = colls.sumOf { it.amount }
     val totalExp get() = exps.sumOf { it.amount }
+    val collected get() = colls.filter { it.toWhom.trim().equals(collector, true) }.sumOf { it.amount }
+    val collectorSpent get() = if (collector.isEmpty()) 0.0 else paid(collector)
+    val collectorCash get() = collected - collectorSpent   // negative = borrowed (collector's own money)
+    fun cashLabel() = if (collectorCash >= 0) "Remaining with collector" else "Borrowed by collector"
     val share get() = if (members.isEmpty()) 0.0 else totalExp / members.size
     fun paid(m: String) = exps.filter { it.member == m }.sumOf { it.amount }
     private fun isMember(n: String) = members.any { it.equals(n.trim(), true) }
@@ -115,6 +124,7 @@ fun csv(s: Store): String {
     CATEGORIES.forEach { c -> val l = s.exps.filter { it.category == c }; b.appendLine("${q(c)},${l.size},${l.sumOf { it.amount }}") }
     b.appendLine("Total Expenses,,${s.totalExp}")
     b.appendLine("Total Members,,${s.members.size}"); b.appendLine("Equal Share Per Person,,${s.share}")
+    b.appendLine("Collector,,${q(s.collector)}"); b.appendLine("Collected,,${s.collected}"); b.appendLine("Expense Paid By Collector,,${s.collectorSpent}"); b.appendLine("${s.cashLabel()},,${abs(s.collectorCash)}")
     b.appendLine(); b.appendLine("Collections"); b.appendLine("Who Gave,To Whom,Amount")
     s.colls.forEach { b.appendLine("${q(it.member)},${q(it.toWhom)},${it.amount}") }
     b.appendLine("Total Collection,,${s.totalColl}")
@@ -125,6 +135,7 @@ fun csv(s: Store): String {
     s.members.forEach { b.appendLine("${q(it)},${s.paid(it)},${s.share},${s.balance(it)}") }
     b.appendLine(); b.appendLine("Who Gives,To Whom,Amount")
     s.settlements().forEach { b.appendLine("${q(it.first)},${q(it.second)},${it.third}") }
+    b.appendLine(); b.appendLine("Thank you! Developed by Prakash Pawar,Contact: 9892399306")
     return b.toString()
 }
 
@@ -133,10 +144,12 @@ fun csvSettle(s: Store): String {
     val b = StringBuilder()
     b.appendLine(q("Members Report: " + s.title))
     b.appendLine("Total Members,${s.members.size}"); b.appendLine("Total Expense,${s.totalExp}"); b.appendLine("Equal Share Per Person,${s.share}")
+    b.appendLine("Collector,${q(s.collector)}"); b.appendLine("Collected,${s.collected}"); b.appendLine("Expense Paid By Collector,${s.collectorSpent}"); b.appendLine("${s.cashLabel()},${abs(s.collectorCash)}")
     b.appendLine(); b.appendLine("Member,Paid,Share,Balance")
     s.members.forEach { b.appendLine("${q(it)},${s.paid(it)},${s.share},${s.balance(it)}") }
     b.appendLine(); b.appendLine("Who Gives,To Whom,Amount")
     s.settlements().forEach { b.appendLine("${q(it.first)},${q(it.second)},${it.third}") }
+    b.appendLine(); b.appendLine("Thank you! Developed by Prakash Pawar,Contact: 9892399306")
     return b.toString()
 }
 
@@ -155,12 +168,16 @@ fun writePdf(ctx: Context, uri: Uri, s: Store, settle: Boolean = false) {
     if (settle) {
         row(listOf("Total Members: ${s.members.size}", "", ""), bold = true)
         row(listOf("Total Expense: ${money(s.totalExp)}", "", ""), bold = true)
-        row(listOf("Equal share per person: ${money(s.share)}", "", ""), bold = true); y += 8
+        row(listOf("Equal share per person: ${money(s.share)}", "", ""), bold = true)
+        row(listOf("Collector: ${s.collector.ifEmpty { "-" }}   Collected: ${money(s.collected)}"), bold = true)
+        row(listOf("Expense by collector: ${money(s.collectorSpent)}"), bold = true)
+        row(listOf("${s.cashLabel()}: ${money(abs(s.collectorCash))}"), bold = true); y += 8
         row(listOf("Member", "Paid", "Balance"), bold = true)
         s.members.forEach { row(listOf(it, money(s.paid(it)), money(s.balance(it)))) }
         y += 8; row(listOf("Who gives -> To whom", "", "Amount"), bold = true)
         s.settlements().forEach { row(listOf("${it.first} -> ${it.second}", "", money(it.third))) }
         if (s.settlements().isEmpty()) row(listOf("All settled"))
+        y += 10; row(listOf("Thank you! Developed by Prakash Pawar"), bold = true); row(listOf("Contact: 9892399306"))
         doc.finishPage(page)
         ctx.contentResolver.openOutputStream(uri)?.use { doc.writeTo(it) }
         doc.close(); return
@@ -170,7 +187,11 @@ fun writePdf(ctx: Context, uri: Uri, s: Store, settle: Boolean = false) {
     row(listOf("Total Expenses", "", money(s.totalExp)), bold = true); y += 8
     row(listOf("Total Collection", "", money(s.totalColl)), bold = true)
     row(listOf("Difference", "", money(s.totalColl - s.totalExp)), bold = true)
-    row(listOf("Total Members: ${s.members.size}   Equal share per person: ${money(s.share)}"), bold = true); y += 8
+    row(listOf("Total Members: ${s.members.size}"), bold = true)
+    row(listOf("Equal share per person: ${money(s.share)}"), bold = true)
+    row(listOf("Collector: ${s.collector.ifEmpty { "-" }}   Collected: ${money(s.collected)}"), bold = true)
+    row(listOf("Expense by collector: ${money(s.collectorSpent)}"), bold = true)
+    row(listOf("${s.cashLabel()}: ${money(abs(s.collectorCash))}"), bold = true); y += 8
     row(listOf("Collections (who gave -> to whom)", "", "Amount"), bold = true)
     s.colls.forEach { row(listOf("${it.member} -> ${it.toWhom}", "", money(it.amount))) }
     y += 8; row(listOf("Expense details (date, member, category)", "Mode", "Amount"), bold = true)
@@ -179,6 +200,7 @@ fun writePdf(ctx: Context, uri: Uri, s: Store, settle: Boolean = false) {
     s.members.forEach { row(listOf(it, money(s.paid(it)), money(s.balance(it)))) }
     y += 8; row(listOf("Who gives -> To whom", "", "Amount"), bold = true)
     s.settlements().forEach { row(listOf("${it.first} -> ${it.second}", "", money(it.third))) }
+    y += 10; row(listOf("Thank you! Developed by Prakash Pawar"), bold = true); row(listOf("Contact: 9892399306"))
     doc.finishPage(page)
     ctx.contentResolver.openOutputStream(uri)?.use { doc.writeTo(it) }
     doc.close()
@@ -251,6 +273,7 @@ fun StatCard(label: String, value: String, mod: Modifier, onClick: (() -> Unit)?
 @Composable
 fun MainPage(s: Store, go: (String) -> Unit, onExit: () -> Unit) {
     var showMembers by remember { mutableStateOf(false) }
+    var showThanks by remember { mutableStateOf(false) }
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Text("Contribution Manager", fontSize = 24.sp, fontWeight = FontWeight.Bold, color = Teal)
         OutlinedTextField(s.title, { s.title = it; s.save() }, label = { Text("Contribution For") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
@@ -272,7 +295,18 @@ fun MainPage(s: Store, go: (String) -> Unit, onExit: () -> Unit) {
             Button({ go("report") }, Modifier.weight(1f)) { Text("Report") }
         }
         Button({ go("settle") }, Modifier.fillMaxWidth()) { Text("Members List & Who Pays Whom") }
-        Button(onExit, Modifier.fillMaxWidth(), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFB3261E))) { Text("Exit") }
+        Button({ showThanks = true }, Modifier.fillMaxWidth(), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFB3261E))) { Text("Exit") }
+        if (showThanks) AlertDialog(
+            onDismissRequest = { showThanks = false },
+            title = { Text("Thank You!") },
+            text = { Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
+                Image(painterResource(R.drawable.prakash_id), "Developer photo", Modifier.size(84.dp, 108.dp).clip(RoundedCornerShape(4.dp)), contentScale = ContentScale.Crop)
+                Spacer(Modifier.height(8.dp))
+                Text("Thank you for using Contribution Tracker.", textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+                Text("Developed by Prakash Pawar", fontWeight = FontWeight.Bold, color = Teal)
+                Text("Contact: 9892399306") } },
+            confirmButton = { TextButton(onExit) { Text("Close App") } },
+            dismissButton = { TextButton({ showThanks = false }) { Text("Cancel") } })
         if (showMembers) AlertDialog(
             onDismissRequest = { showMembers = false },
             title = { Text("Members (${s.members.size})") },
@@ -321,7 +355,7 @@ fun MemberScreen(s: Store) {
 
 @Composable
 fun CollScreen(s: Store) {
-    var member by remember { mutableStateOf("") }; var amt by remember { mutableStateOf("") }
+    var member by remember { mutableStateOf("") }; var amt by remember { mutableStateOf("") }; var allDlg by remember { mutableStateOf(false) }
     Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("Money Collector: ${s.collector.ifEmpty { "not selected (set in Member Entry)" }}", fontWeight = FontWeight.Bold, color = Teal)
         Drop("Who gives (collector may give too)", s.members, member) { member = it }
@@ -330,6 +364,16 @@ fun CollScreen(s: Store) {
             val a = amt.toDoubleOrNull()
             if (member.isNotEmpty() && s.collector.isNotEmpty() && a != null && a > 0) { s.colls.add(Coll(member, s.collector, a)); s.save(); amt = "" }
         }, Modifier.fillMaxWidth()) { Text("Add Collection") }
+        OutlinedButton({ val a = amt.toDoubleOrNull(); if (s.collector.isNotEmpty() && a != null && a > 0 && s.members.isNotEmpty()) allDlg = true },
+            Modifier.fillMaxWidth()) { Text("Add same amount for ALL members") }
+        if (s.collector.isNotEmpty()) Text("Collected ${money(s.collected)} − Expense ${money(s.collectorSpent)} → ${s.cashLabel()}: ${money(abs(s.collectorCash))}",
+            fontSize = 13.sp, fontWeight = FontWeight.Bold, color = if (s.collectorCash < 0) Color(0xFFB3261E) else Teal)
+        if (allDlg) AlertDialog(
+            onDismissRequest = { allDlg = false },
+            title = { Text("Common collection") },
+            text = { Text("Add ${money(amt.toDoubleOrNull() ?: 0.0)} from each of ${s.members.size} members to ${s.collector}?") },
+            confirmButton = { TextButton({ val a = amt.toDoubleOrNull() ?: 0.0; s.members.forEach { s.colls.add(Coll(it, s.collector, a)) }; s.save(); amt = ""; allDlg = false }) { Text("Add") } },
+            dismissButton = { TextButton({ allDlg = false }) { Text("No") } })
         if (member.isNotEmpty()) {
             val given = s.colls.filter { it.member == member }.sumOf { it.amount }
             val recv = s.colls.filter { it.toWhom == member }.sumOf { it.amount }
@@ -406,6 +450,9 @@ fun SettleScreen(s: Store) {
         Text("Total members: ${s.members.size}", fontWeight = FontWeight.Bold)
         Text("Total expense: ${money(s.totalExp)}")
         Text("Equal share per person: ${money(s.share)}", fontWeight = FontWeight.Bold, color = Teal)
+        Text("Collector: ${s.collector.ifEmpty { "-" }}   Collected: ${money(s.collected)}")
+        Text("Expense paid by collector: ${money(s.collectorSpent)}")
+        Text("${s.cashLabel()}: ${money(abs(s.collectorCash))}", fontWeight = FontWeight.Bold, color = if (s.collectorCash < 0) Color(0xFFB3261E) else Teal)
         Spacer(Modifier.height(6.dp))
         Row(Modifier.fillMaxWidth()) { Text("Member", Modifier.weight(2f), fontWeight = FontWeight.Bold); Text("Paid", Modifier.weight(1.5f), fontWeight = FontWeight.Bold); Text("Balance", Modifier.weight(1.5f), fontWeight = FontWeight.Bold) }
         s.members.forEach { m ->
