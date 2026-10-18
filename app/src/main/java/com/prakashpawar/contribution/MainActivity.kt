@@ -13,6 +13,8 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.foundation.background
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
@@ -47,8 +49,8 @@ val CATEGORIES = listOf(
 )
 val MODES = listOf("Cash", "UPI", "Online", "Others")
 
-data class Coll(val member: String, val toWhom: String, val amount: Double)
-data class Exp(val member: String, val date: String, val category: String, val mode: String, val desc: String, val amount: Double)
+data class Coll(val member: String, val toWhom: String, val amount: Double, val at: String = "")
+data class Exp(val member: String, val date: String, val category: String, val mode: String, val desc: String, val amount: Double, val updated: String = "")
 
 class Store(private val ctx: Context) {
     var title by mutableStateOf("")
@@ -101,20 +103,23 @@ class Store(private val ctx: Context) {
         put("title", title)
         put("collector", collector)
         put("members", JSONArray(members))
-        put("collections", JSONArray().also { a -> colls.forEach { a.put(JSONObject().put("member", it.member).put("toWhom", it.toWhom).put("amount", it.amount)) } })
-        put("expenses", JSONArray().also { a -> exps.forEach { a.put(JSONObject().put("member", it.member).put("date", it.date).put("category", it.category).put("mode", it.mode).put("desc", it.desc).put("amount", it.amount)) } })
+        put("collections", JSONArray().also { a -> colls.forEach { a.put(JSONObject().put("member", it.member).put("toWhom", it.toWhom).put("amount", it.amount).put("at", it.at)) } })
+        put("expenses", JSONArray().also { a -> exps.forEach { a.put(JSONObject().put("member", it.member).put("date", it.date).put("category", it.category).put("mode", it.mode).put("desc", it.desc).put("amount", it.amount).put("updated", it.updated)) } })
     }
 
     fun fromJson(j: JSONObject) {
         title = j.optString("title"); collector = j.optString("collector"); members.clear(); colls.clear(); exps.clear()
         j.optJSONArray("members")?.let { for (i in 0 until it.length()) members.add(it.getString(i)) }
-        j.optJSONArray("collections")?.let { for (i in 0 until it.length()) it.getJSONObject(i).let { o -> colls.add(Coll(o.getString("member"), o.getString("toWhom"), o.getDouble("amount"))) } }
-        j.optJSONArray("expenses")?.let { for (i in 0 until it.length()) it.getJSONObject(i).let { o -> exps.add(Exp(o.getString("member"), o.getString("date"), o.getString("category"), o.getString("mode"), o.getString("desc"), o.getDouble("amount"))) } }
+        j.optJSONArray("collections")?.let { for (i in 0 until it.length()) it.getJSONObject(i).let { o -> colls.add(Coll(o.getString("member"), o.getString("toWhom"), o.getDouble("amount"), o.optString("at"))) } }
+        j.optJSONArray("expenses")?.let { for (i in 0 until it.length()) it.getJSONObject(i).let { o -> exps.add(Exp(o.getString("member"), o.getString("date"), o.getString("category"), o.getString("mode"), o.getString("desc"), o.getDouble("amount"), o.optString("updated"))) } }
         save()
     }
 }
 
 fun up(d: Double) = ceil(d - 1e-6)   // round up to whole rupee
+fun now(): String = SimpleDateFormat("dd-MM-yyyy HH:mm", Locale.getDefault()).format(Date())
+val EXP_X = listOf(40f, 108f, 182f, 290f, 335f, 405f)
+val EXP_L = listOf(10, 12, 18, 6, 10, 16)
 fun today(): String = SimpleDateFormat("dd-MM-yyyy", Locale.getDefault()).format(Date())
 fun money(d: Double) = (if (d < -0.004) "-" else "") + "₹" + String.format(Locale.getDefault(), "%.2f", abs(d))
 fun toast(c: Context, m: String) = Toast.makeText(c, m, Toast.LENGTH_SHORT).show()
@@ -131,11 +136,11 @@ fun csv(s: Store): String {
     b.appendLine("Total Expenses,,${s.totalExp}")
     b.appendLine("Total Members,,${s.members.size}"); b.appendLine("Equal Share Per Person,,${s.share}")
     b.appendLine("Collector,,${q(s.collector)}"); b.appendLine("Collected,,${s.collected}"); b.appendLine("Expense Paid By Collector,,${s.collectorSpent}"); b.appendLine("${s.cashLabel()},,${abs(s.collectorCash)}")
-    b.appendLine(); b.appendLine("Collections"); b.appendLine("Who Gave,To Whom,Amount")
-    s.colls.forEach { b.appendLine("${q(it.member)},${q(it.toWhom)},${it.amount}") }
+    b.appendLine(); b.appendLine("Collections"); b.appendLine("Who Gave,To Whom,Amount,Entered On")
+    s.colls.forEach { b.appendLine("${q(it.member)},${q(it.toWhom)},${it.amount},${q(it.at)}") }
     b.appendLine("Total Collection,,${s.totalColl}")
-    b.appendLine(); b.appendLine("Expenses"); b.appendLine("Member,Date,Category,Mode,Description,Amount")
-    s.exps.forEach { b.appendLine("${q(it.member)},${it.date},${q(it.category)},${it.mode},${q(it.desc)},${it.amount}") }
+    b.appendLine(); b.appendLine("Expenses"); b.appendLine("Member,Purchase Date,Category,Mode,Description,Amount,Updated On")
+    s.exps.forEach { b.appendLine("${q(it.member)},${it.date},${q(it.category)},${it.mode},${q(it.desc)},${it.amount},${q(it.updated)}") }
     b.appendLine(); b.appendLine("Difference (Collection - Expense),,${s.totalColl - s.totalExp}")
     b.appendLine(); b.appendLine("Member,Paid,Difference,Balance")
     s.members.forEach { b.appendLine("${q(it)},${s.paid(it)},${s.difference(it)},${s.stmtBalance(it)}") }
@@ -163,13 +168,13 @@ fun writePdf(ctx: Context, uri: Uri, s: Store, settle: Boolean = false) {
     val doc = PdfDocument(); var n = 1
     var page = doc.startPage(PdfDocument.PageInfo.Builder(595, 842, n).create()); var y = 50f
     val p = Paint()
-    fun row(cols: List<String>, size: Float = 11f, bold: Boolean = false) {
+    fun row(cols: List<String>, size: Float = 11f, bold: Boolean = false, cx: List<Float>? = null, lim: List<Int>? = null) {
         if (y > 790) { doc.finishPage(page); n++; page = doc.startPage(PdfDocument.PageInfo.Builder(595, 842, n).create()); y = 50f }
         p.textSize = size; p.isFakeBoldText = bold
-        val xs = if (cols.size == 4) listOf(40f, 220f, 330f, 440f) else listOf(40f, 340f, 430f)
+        val xs = cx ?: if (cols.size == 4) listOf(40f, 220f, 330f, 440f) else listOf(40f, 320f, 430f)
         xs.forEachIndexed { i, x -> cols.getOrNull(i)?.let { c ->
             p.color = if (c.startsWith("-₹")) android.graphics.Color.RED else android.graphics.Color.BLACK
-            page.canvas.drawText(c.take(if (i == 0) (if (cols.size == 4) 26 else 48) else 14), x, y, p) } }
+            page.canvas.drawText(c.take(lim?.getOrNull(i) ?: if (i == 0) (if (cols.size == 4) 26 else 48) else 16), x, y, p) } }
         p.color = android.graphics.Color.BLACK
         y += size + 8
     }
@@ -203,10 +208,10 @@ fun writePdf(ctx: Context, uri: Uri, s: Store, settle: Boolean = false) {
     row(listOf("Collector: ${s.collector.ifEmpty { "-" }}   Collected: ${money(s.collected)}"), bold = true)
     row(listOf("Expense by collector: ${money(s.collectorSpent)}"), bold = true)
     row(listOf("${s.cashLabel()}: ${money(abs(s.collectorCash))}"), bold = true); y += 8
-    row(listOf("Collections (who gave -> to whom)", "", "Amount"), bold = true)
-    s.colls.forEach { row(listOf("${it.member} -> ${it.toWhom}", "", money(it.amount))) }
-    y += 8; row(listOf("Expense details (date, member, category)", "Mode", "Amount"), bold = true)
-    s.exps.forEach { row(listOf("${it.date} ${it.member}: ${it.category}", it.mode, money(it.amount))) }
+    row(listOf("Collections (who gave -> to whom)", "Entered on", "Amount"), bold = true)
+    s.colls.forEach { row(listOf("${it.member} -> ${it.toWhom}", it.at, money(it.amount))) }
+    y += 8; row(listOf("Purchase date", "Member", "Category", "Mode", "Amount", "Updated on"), 10f, true, EXP_X, EXP_L)
+    s.exps.forEach { row(listOf(it.date, it.member, it.category, it.mode, money(it.amount), it.updated), 10f, false, EXP_X, EXP_L) }
     y += 8; row(listOf("Member", "Paid", "Difference", "Balance"), bold = true)
     s.members.forEach { row(listOf(it, money(s.paid(it)), money(s.difference(it)), money(s.stmtBalance(it)))) }
     row(listOf("Paid = expense by member")); row(listOf("Difference = contributed + expense")); row(listOf("Balance = equal share - difference"))
@@ -327,6 +332,12 @@ fun MainPage(s: Store, go: (String) -> Unit, onExit: () -> Unit) {
         }
         Button({ nav("settle") }, Modifier.fillMaxWidth()) { Text("Members List & Who Pays Whom", fontSize = 13.sp) }
         Button({ editing = false; showThanks = true }, Modifier.fillMaxWidth(), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFB3261E))) { Text("Exit", fontSize = 13.sp) }
+        Box(Modifier.fillMaxWidth().aspectRatio(969f / 667f).clip(RoundedCornerShape(12.dp))) {
+            Image(painterResource(R.drawable.welcome_picnic), "Welcome", Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+            Text("Welcome", Modifier.align(Alignment.TopCenter).padding(top = 8.dp)
+                .background(Color.White.copy(alpha = 0.65f), RoundedCornerShape(16.dp)).padding(horizontal = 18.dp, vertical = 2.dp),
+                fontFamily = FontFamily.Cursive, fontStyle = FontStyle.Italic, fontWeight = FontWeight.Bold, fontSize = 34.sp, color = Color(0xFFB0245B))
+        }
         if (showThanks) AlertDialog(
             onDismissRequest = { showThanks = false },
             title = { Text("Thank You!") },
@@ -393,7 +404,7 @@ fun CollScreen(s: Store) {
         OutlinedTextField(amt, { amt = it }, label = { Text("Amount") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
         Button({
             val a = amt.toDoubleOrNull()
-            if (member.isNotEmpty() && s.collector.isNotEmpty() && a != null && a > 0) { s.colls.add(Coll(member, s.collector, a)); s.save(); amt = "" }
+            if (member.isNotEmpty() && s.collector.isNotEmpty() && a != null && a > 0) { s.colls.add(Coll(member, s.collector, a, now())); s.save(); amt = "" }
         }, Modifier.fillMaxWidth()) { Text("Add Collection") }
         OutlinedButton({ val a = amt.toDoubleOrNull(); if (s.collector.isNotEmpty() && a != null && a > 0 && s.members.isNotEmpty()) allDlg = true },
             Modifier.fillMaxWidth()) { Text("Add same amount for ALL members") }
@@ -403,7 +414,7 @@ fun CollScreen(s: Store) {
             onDismissRequest = { allDlg = false },
             title = { Text("Common collection") },
             text = { Text("Add ${money(amt.toDoubleOrNull() ?: 0.0)} from each of ${s.members.size} members to ${s.collector}?") },
-            confirmButton = { TextButton({ val a = amt.toDoubleOrNull() ?: 0.0; s.members.forEach { s.colls.add(Coll(it, s.collector, a)) }; s.save(); amt = ""; allDlg = false }) { Text("Add") } },
+            confirmButton = { TextButton({ val a = amt.toDoubleOrNull() ?: 0.0; s.members.forEach { s.colls.add(Coll(it, s.collector, a, now())) }; s.save(); amt = ""; allDlg = false }) { Text("Add") } },
             dismissButton = { TextButton({ allDlg = false }) { Text("No") } })
         if (member.isNotEmpty()) {
             val given = s.colls.filter { it.member == member }.sumOf { it.amount }
@@ -417,7 +428,10 @@ fun CollScreen(s: Store) {
         }
         s.colls.filter { member.isEmpty() || it.member == member || it.toWhom == member }.forEach { c ->
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                Text("${c.member} → ${c.toWhom}: ${money(c.amount)}", Modifier.weight(1f), fontSize = 14.sp)
+                Column(Modifier.weight(1f)) {
+                    Text("${c.member} → ${c.toWhom}: ${money(c.amount)}", fontSize = 14.sp)
+                    if (c.at.isNotEmpty()) Text("Entered: ${c.at}", fontSize = 10.sp, color = Color.Gray)
+                }
                 TextButton({ s.colls.remove(c); s.save() }) { Text("✕") } }
         }
         Text("Total collection (Collector: ${s.collector.ifEmpty { "-" }}): ${money(s.totalColl)}", fontWeight = FontWeight.Bold)
@@ -427,13 +441,19 @@ fun CollScreen(s: Store) {
 
 @Composable
 fun ExpScreen(s: Store) {
+    val ctx = LocalContext.current
     var member by remember { mutableStateOf(s.collector) }; var date by remember { mutableStateOf(today()) }
     var cat by remember { mutableStateOf("") }; var mode by remember { mutableStateOf("") }
     var desc by remember { mutableStateOf("") }; var amt by remember { mutableStateOf("") }
     Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Column(Modifier.weight(1f).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Drop("Member", s.members, member) { member = it }
-            OutlinedTextField(date, { date = it }, label = { Text("Date") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
+            OutlinedButton({
+                val c = Calendar.getInstance()
+                runCatching { SimpleDateFormat("dd-MM-yyyy", Locale.getDefault()).parse(date)?.let { c.time = it } }
+                android.app.DatePickerDialog(ctx, { _, yy, mm, dd -> date = String.format(Locale.getDefault(), "%02d-%02d-%04d", dd, mm + 1, yy) },
+                    c.get(Calendar.YEAR), c.get(Calendar.MONTH), c.get(Calendar.DAY_OF_MONTH)).show()
+            }, Modifier.fillMaxWidth()) { Text("Purchase date: $date  (tap to change)") }
             Drop("Category", CATEGORIES, cat) { cat = it }
             Drop("Payment", MODES, mode) { mode = it }
             OutlinedTextField(desc, { desc = it }, label = { Text("Description / Details") }, modifier = Modifier.fillMaxWidth())
@@ -441,13 +461,16 @@ fun ExpScreen(s: Store) {
             Button({
                 val a = amt.toDoubleOrNull()
                 if (member.isNotEmpty() && cat.isNotEmpty() && a != null) {
-                    s.exps.add(Exp(member, date, cat, mode.ifEmpty { "Cash" }, desc.trim(), a)); s.save(); amt = ""; desc = ""
+                    s.exps.add(Exp(member, date, cat, mode.ifEmpty { "Cash" }, desc.trim(), a, now())); s.save(); amt = ""; desc = ""
                 }
             }, Modifier.fillMaxWidth()) { Text("Add Expense") }
             ExportRow(s)
             s.exps.filter { member.isEmpty() || it.member == member }.takeLast(15).reversed().forEach { e ->
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                    Text("${e.date} • ${e.category.take(18)} • ${e.mode} • ${money(e.amount)}", Modifier.weight(1f), fontSize = 12.sp)
+                    Column(Modifier.weight(1f)) {
+                        Text("${e.date} • ${e.category.take(18)} • ${e.mode} • ${money(e.amount)}", fontSize = 12.sp)
+                        if (e.updated.isNotEmpty()) Text("Updated: ${e.updated}", fontSize = 10.sp, color = Color.Gray)
+                    }
                     TextButton({ s.exps.remove(e); s.save() }) { Text("✕") } }
             }
         }
