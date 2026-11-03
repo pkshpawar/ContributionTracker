@@ -69,23 +69,30 @@ class Store(private val ctx: Context) {
     fun paid(m: String) = exps.filter { it.member == m }.sumOf { it.amount }
     private fun isMember(n: String) = members.any { it.equals(n.trim(), true) }
     // balance > 0: should receive, < 0: should pay. Collections between members adjust it.
+    val absorberName get() = members.find { it.equals(collector, true) } ?: members.firstOrNull() ?: ""
+    // everyone pays the same rounded share; the collector absorbs the rounding difference
+    fun shareOf(m: String): Double =
+        if (members.isEmpty()) 0.0 else if (m == absorberName) totalExp - share * (members.size - 1) else share
     fun net(m: String): Double {
         val given = colls.filter { it.member == m && isMember(it.toWhom) && !it.toWhom.trim().equals(m, true) }.sumOf { it.amount }
         val recv = colls.filter { it.toWhom.trim().equals(m, true) && it.member != m }.sumOf { it.amount }
-        return paid(m) + given - recv - share
+        return paid(m) + given - recv - shareOf(m)
     }
     // Paid = member's expense; Difference = contributed + expense; Balance = equal share - Difference
     fun contributed(m: String) = colls.filter { it.member == m }.sumOf { it.amount }
     fun difference(m: String) = contributed(m) + paid(m)
-    fun stmtBalance(m: String) = share - difference(m)
+    fun stmtBalance(m: String) = shareOf(m) - difference(m)
     fun settlements(): List<Triple<String, String, Double>> {
-        val deb = members.associateWith { -net(it) }.filter { it.value > 0.005 }.toMutableMap()
-        val cre = members.associateWith { net(it) }.filter { it.value > 0.005 }.toMutableMap()
+        val nets = members.associateWith { Math.round(net(it)).toDouble() }.toMutableMap()
+        val ab = absorberName
+        if (ab.isNotEmpty()) nets[ab] = -nets.filterKeys { it != ab }.values.sum()   // rounding difference goes to the collector
+        val deb = nets.filter { it.value < -0.5 }.mapValues { -it.value }.toMutableMap()
+        val cre = nets.filter { it.value > 0.5 }.toMutableMap()
         val out = mutableListOf<Triple<String, String, Double>>()
         while (deb.isNotEmpty() && cre.isNotEmpty()) {
             val d = deb.maxByOrNull { it.value }!!; val c = cre.maxByOrNull { it.value }!!
             val a = minOf(d.value, c.value)
-            out.add(Triple(d.key, c.key, up(a)))
+            out.add(Triple(d.key, c.key, a))
             deb[d.key] = d.value - a; cre[c.key] = c.value - a
             if (deb[d.key]!! < 0.005) deb.remove(d.key)
             if (cre[c.key]!! < 0.005) cre.remove(c.key)
@@ -99,6 +106,36 @@ class Store(private val ctx: Context) {
     }
 
     fun save() = ctx.getSharedPreferences("data", Context.MODE_PRIVATE).edit().putString("json", toJson().toString()).apply()
+
+    fun backupCsv(): String {
+        val b = StringBuilder()
+        b.appendLine("#ContributionTrackerBackup,1")
+        b.appendLine("TITLE,${csvq(title)}"); b.appendLine("COLLECTOR,${csvq(collector)}")
+        members.forEach { b.appendLine("MEMBER,${csvq(it)}") }
+        colls.forEach { b.appendLine("COLLECTION,${csvq(it.member)},${csvq(it.toWhom)},${it.amount},${csvq(it.at)}") }
+        exps.forEach { b.appendLine("EXPENSE,${csvq(it.member)},${csvq(it.date)},${csvq(it.category)},${csvq(it.mode)},${csvq(it.desc)},${it.amount},${csvq(it.updated)}") }
+        return b.toString()
+    }
+
+    fun importCsv(text: String): Boolean {
+        val rows = parseCsv(text)
+        if (rows.isEmpty() || rows[0].firstOrNull() != "#ContributionTrackerBackup") return false
+        val ms = mutableListOf<String>(); val cs = mutableListOf<Coll>(); val es = mutableListOf<Exp>()
+        var ti = ""; var co = ""
+        rows.drop(1).forEach { r ->
+            fun g(i: Int) = r.getOrElse(i) { "" }
+            when (r.firstOrNull()) {
+                "TITLE" -> ti = g(1)
+                "COLLECTOR" -> co = g(1)
+                "MEMBER" -> if (g(1).isNotEmpty()) ms.add(g(1))
+                "COLLECTION" -> cs.add(Coll(g(1), g(2), g(3).toDoubleOrNull() ?: 0.0, g(4)))
+                "EXPENSE" -> es.add(Exp(g(1), g(2), g(3), g(4), g(5), g(6).toDoubleOrNull() ?: 0.0, g(7)))
+            }
+        }
+        title = ti; collector = co
+        members.clear(); members.addAll(ms); colls.clear(); colls.addAll(cs); exps.clear(); exps.addAll(es)
+        save(); return true
+    }
 
     fun toJson() = JSONObject().apply {
         put("title", title)
@@ -128,6 +165,29 @@ fun toast(c: Context, m: String) = Toast.makeText(c, m, Toast.LENGTH_SHORT).show
 fun write(ctx: Context, uri: Uri, text: String) =
     ctx.contentResolver.openOutputStream(uri)?.use { it.write(text.toByteArray()) }
 
+fun parseCsv(text: String): List<List<String>> {
+    val s = text.removePrefix("\uFEFF")
+    val rows = mutableListOf<List<String>>(); var row = mutableListOf<String>(); val sb = StringBuilder()
+    var inQ = false; var i = 0
+    while (i < s.length) {
+        val c = s[i]
+        if (inQ) {
+            if (c == '"') { if (i + 1 < s.length && s[i + 1] == '"') { sb.append('"'); i++ } else inQ = false } else sb.append(c)
+        } else if (c == '"') inQ = true
+        else if (c == ',') { row.add(sb.toString()); sb.clear() }
+        else if (c == '\n') { row.add(sb.toString().trimEnd('\r')); sb.clear(); rows.add(row); row = mutableListOf() }
+        else sb.append(c)
+        i++
+    }
+    if (sb.isNotEmpty() || row.isNotEmpty()) { row.add(sb.toString().trimEnd('\r')); rows.add(row) }
+    return rows
+}
+
+fun backupName(title: String): String {
+    val base = title.trim().ifEmpty { "Contribution" }.replace(Regex("[\\\\/:*?\"<>|]"), "_")
+    return base + "_" + SimpleDateFormat("ddMMyyyyHHmmss", Locale.getDefault()).format(Date()) + ".csv"
+}
+
 fun csvq(t: String) = "\"" + t.replace("\"", "\"\"") + "\""
 const val FOOTER = "Thank you! Developed by Prakash Pawar,Contact: 9892399306"
 fun dkey(d: String) = if (d.length >= 10) d.substring(6, 10) + d.substring(3, 5) + d.substring(0, 2) else "0"
@@ -141,7 +201,7 @@ fun csv(s: Store): String {
     b.appendLine(); b.appendLine("Category,Entries,Total")
     CATEGORIES.forEach { c -> val l = s.exps.filter { it.category == c }; b.appendLine("${csvq(c)},${l.size},${l.sumOf { it.amount }}") }
     b.appendLine("Total Expenses,,${s.totalExp}"); b.appendLine("Total Collection,,${s.totalColl}")
-    b.appendLine("Total Members,,${s.members.size}"); b.appendLine("Equal Share Per Person,,${s.share}")
+    b.appendLine("Total Members,,${s.members.size}"); b.appendLine("Equal Share Per Person,,${s.share}"); b.appendLine("Collector Share (rounding adjusted),,${s.shareOf(s.absorberName)}")
     b.appendLine("Collector,,${csvq(s.collector)}"); b.appendLine("Collected,,${s.collected}"); b.appendLine("Expense Paid By Collector,,${s.collectorSpent}"); b.appendLine("${s.cashLabel()},,${abs(s.collectorCash)}")
     b.appendLine(); b.appendLine("Datewise Report"); b.appendLine("Date,Type,Member,To Whom / Category,Mode,Description,Amount,Entered / Updated On")
     dates(s).forEach { d ->
@@ -184,7 +244,7 @@ fun csvExp(s: Store): String {
 fun csvSettle(s: Store): String {
     val b = StringBuilder()
     b.appendLine(csvq("Members Report: " + s.title))
-    b.appendLine("Total Members,${s.members.size}"); b.appendLine("Total Expense,${s.totalExp}"); b.appendLine("Equal Share Per Person,${s.share}")
+    b.appendLine("Total Members,${s.members.size}"); b.appendLine("Total Expense,${s.totalExp}"); b.appendLine("Equal Share Per Person,${s.share}"); b.appendLine("Collector Share (rounding adjusted),${s.shareOf(s.absorberName)}")
     b.appendLine("Collector,${csvq(s.collector)}"); b.appendLine("Collected,${s.collected}"); b.appendLine("Expense Paid By Collector,${s.collectorSpent}"); b.appendLine("${s.cashLabel()},${abs(s.collectorCash)}")
     b.appendLine(); b.appendLine("Member,Paid,Difference,Balance")
     s.members.forEach { b.appendLine("${csvq(it)},${s.paid(it)},${s.difference(it)},${s.stmtBalance(it)}") }
@@ -225,6 +285,7 @@ fun writePdf(ctx: Context, uri: Uri, s: Store, mode: String = "full") {
         row(listOf("Collector: ${s.collector.ifEmpty { "-" }}   Collected: ${money(s.collected)}"), bold = true)
         row(listOf("Expense by collector: ${money(s.collectorSpent)}"), bold = true)
         row(listOf("${s.cashLabel()}: ${money(abs(s.collectorCash))}"), bold = true)
+        if (s.members.isNotEmpty() && abs(s.shareOf(s.absorberName) - s.share) > 0.004) row(listOf("Collector share (rounding adj.): ${money(s.shareOf(s.absorberName))}"))
     }
     row(listOf(s.title.ifBlank { "Contribution Information" }), 18f, true)
     when (mode) { "settle" -> "Members & Settlement Report"; "coll" -> "Collection Report"; "exp" -> "Expense Report"; else -> "" }
@@ -393,16 +454,19 @@ fun MainPage(s: Store, go: (String) -> Unit, onExit: () -> Unit, welcome: Boolea
             if (welcome) Text("Welcome", Modifier.align(Alignment.TopCenter).padding(top = 8.dp)
                 .background(Color.White.copy(alpha = 0.65f), RoundedCornerShape(16.dp)).padding(horizontal = 18.dp, vertical = 2.dp),
                 fontFamily = FontFamily.Cursive, fontStyle = FontStyle.Italic, fontWeight = FontWeight.Bold, fontSize = 34.sp, color = Color(0xFFB0245B))
-            Text("@Prakash Pawar Ver 1.0", Modifier.align(Alignment.BottomCenter).padding(bottom = 4.dp)
-                .background(Color.Black.copy(alpha = 0.45f), RoundedCornerShape(8.dp)).padding(horizontal = 8.dp, vertical = 1.dp), color = Color.White, fontSize = 10.sp)
         }
         if (showThanks) AlertDialog(
             onDismissRequest = { showThanks = false },
             title = { Text("Thank You!") },
-            text = { Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
+            text = { Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()), horizontalAlignment = Alignment.CenterHorizontally) {
+                IndianFlag()
+                Spacer(Modifier.height(4.dp))
+                Text("जय हिंद", fontSize = 24.sp, fontWeight = FontWeight.Bold, color = Color(0xFFFF9933))
+                Text("धन्यवाद", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFF138808))
+                Text("@प्रकाश पवार Ver. १.०", fontSize = 14.sp, color = Teal)
+                Spacer(Modifier.height(8.dp))
                 Image(painterResource(R.drawable.prakash_id), "Developer photo", Modifier.size(84.dp, 108.dp).clip(RoundedCornerShape(4.dp)), contentScale = ContentScale.Crop)
                 Spacer(Modifier.height(8.dp))
-                Text("Thank you for using Contribution Tracker.", textAlign = androidx.compose.ui.text.style.TextAlign.Center)
                 Text("Developed by Prakash Pawar", fontWeight = FontWeight.Bold, color = Teal)
                 Text("Contact: 9892399306") } },
             confirmButton = { TextButton(onExit) { Text("Close App") } },
@@ -564,6 +628,8 @@ fun ReportScreen(s: Store) {
         Text("Difference: ${money(s.totalColl - s.totalExp)}", fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(8.dp))
         ExportRow(s)
+        HorizontalDivider(Modifier.padding(vertical = 6.dp))
+        BackupRow(s)
     }
 }
 
@@ -574,6 +640,8 @@ fun SettleScreen(s: Store) {
         Text("Total members: ${s.members.size}", fontWeight = FontWeight.Bold)
         Text("Total expense: ${money(s.totalExp)}")
         Text("Equal share per person (rounded up): ${money(s.share)}", fontWeight = FontWeight.Bold, color = Teal)
+        if (s.members.isNotEmpty() && abs(s.shareOf(s.absorberName) - s.share) > 0.004)
+            Text("${s.absorberName} (collector) share incl. rounding difference: ${money(s.shareOf(s.absorberName))}", fontSize = 12.sp)
         Text("Collector: ${s.collector.ifEmpty { "-" }}   Collected: ${money(s.collected)}")
         Text("Expense paid by collector: ${money(s.collectorSpent)}")
         Text("${s.cashLabel()}: ${money(abs(s.collectorCash))}", fontWeight = FontWeight.Bold, color = if (s.collectorCash < 0) Color(0xFFB3261E) else Teal)
@@ -603,3 +671,49 @@ fun SettleScreen(s: Store) {
 @Composable
 fun Amt(v: Double, mod: Modifier) =
     Text(money(v), mod, fontSize = 12.sp, color = if (v < -0.004) Color(0xFFB3261E) else Color.Unspecified)
+
+@Composable
+fun BackupRow(s: Store) {
+    val ctx = LocalContext.current
+    var pending by remember { mutableStateOf<Uri?>(null) }
+    val exp = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/csv")) { u ->
+        u?.let { write(ctx, it, s.backupCsv()); toast(ctx, "Backup saved") } }
+    val imp = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { u -> pending = u }
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text("Backup / transfer to another phone (CSV)", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button({ exp.launch(backupName(s.title)) }, Modifier.weight(1f)) { Text("Export CSV") }
+            OutlinedButton({ imp.launch(arrayOf("*/*")) }, Modifier.weight(1f)) { Text("Import CSV") }
+        }
+    }
+    pending?.let { u ->
+        AlertDialog(
+            onDismissRequest = { pending = null },
+            title = { Text("Import CSV") },
+            text = { Text("Importing replaces all current data in this app. Continue?") },
+            confirmButton = { TextButton({
+                runCatching {
+                    val txt = ctx.contentResolver.openInputStream(u)!!.bufferedReader().readText()
+                    toast(ctx, if (s.importCsv(txt)) "Imported" else "Not a valid backup file")
+                }.onFailure { toast(ctx, "Import failed") }
+                pending = null }) { Text("Import") } },
+            dismissButton = { TextButton({ pending = null }) { Text("No") } })
+    }
+}
+
+@Composable
+fun IndianFlag() {
+    androidx.compose.foundation.Canvas(Modifier.size(72.dp, 48.dp)) {
+        val h = size.height / 3
+        val w = size.width
+        drawRect(Color(0xFFFF9933), androidx.compose.ui.geometry.Offset(0f, 0f), androidx.compose.ui.geometry.Size(w, h))
+        drawRect(Color.White, androidx.compose.ui.geometry.Offset(0f, h), androidx.compose.ui.geometry.Size(w, h))
+        drawRect(Color(0xFF138808), androidx.compose.ui.geometry.Offset(0f, 2 * h), androidx.compose.ui.geometry.Size(w, h))
+        val c = center; val r = h * 0.42f; val navy = Color(0xFF000080)
+        drawCircle(navy, r, c, style = androidx.compose.ui.graphics.drawscope.Stroke(1.5f))
+        for (i in 0 until 24) {
+            val a = Math.toRadians(i * 15.0)
+            drawLine(navy, c, androidx.compose.ui.geometry.Offset(c.x + r * Math.cos(a).toFloat(), c.y + r * Math.sin(a).toFloat()), 1f)
+        }
+    }
+}
