@@ -26,6 +26,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -193,6 +194,16 @@ const val FOOTER = "Thank you! Developed by Prakash Pawar,Contact: 9892399306"
 fun dkey(d: String) = if (d.length >= 10) d.substring(6, 10) + d.substring(3, 5) + d.substring(0, 2) else "0"
 fun cDate(c: Coll) = c.at.take(10).ifEmpty { "Unknown" }
 fun eDate(e: Exp) = e.date.ifEmpty { "Unknown" }
+data class StRow(val date: String, val part: String, val coll: Double, val exp: Double, val bal: Double, val isDate: Boolean = false)
+fun statement(s: Store): List<StRow> {
+    val out = mutableListOf<StRow>(); var bal = 0.0
+    dates(s).forEach { d ->
+        out.add(StRow(d, d, 0.0, 0.0, bal, true))
+        s.colls.filter { cDate(it) == d }.forEach { bal += it.amount; out.add(StRow(d, "Collection: ${it.member} -> ${it.toWhom}", it.amount, 0.0, bal)) }
+        s.exps.filter { eDate(it) == d }.forEach { bal -= it.amount; out.add(StRow(d, "${it.category} (${it.member})", 0.0, it.amount, bal)) }
+    }
+    return out
+}
 fun dates(s: Store) = (s.colls.map { cDate(it) } + s.exps.map { eDate(it) }).distinct().sortedBy { dkey(it) }
 
 fun csv(s: Store): String {
@@ -203,6 +214,8 @@ fun csv(s: Store): String {
     b.appendLine("Total Expenses,,${s.totalExp}"); b.appendLine("Total Collection,,${s.totalColl}")
     b.appendLine("Total Members,,${s.members.size}"); b.appendLine("Equal Share Per Person,,${s.share}"); b.appendLine("Collector Share (rounding adjusted),,${s.shareOf(s.absorberName)}")
     b.appendLine("Collector,,${csvq(s.collector)}"); b.appendLine("Collected,,${s.collected}"); b.appendLine("Expense Paid By Collector,,${s.collectorSpent}"); b.appendLine("${s.cashLabel()},,${abs(s.collectorCash)}")
+    b.appendLine(); b.appendLine("Statement"); b.appendLine("Date,Particular,Collection,Expense,Balance")
+    statement(s).filter { !it.isDate }.forEach { b.appendLine("${it.date},${csvq(it.part)},${if (it.coll != 0.0) it.coll.toString() else ""},${if (it.exp != 0.0) it.exp.toString() else ""},${it.bal}") }
     b.appendLine(); b.appendLine("Datewise Report"); b.appendLine("Date,Type,Member,To Whom / Category,Mode,Description,Amount,Entered / Updated On")
     dates(s).forEach { d ->
         val cl = s.colls.filter { cDate(it) == d }; val ex = s.exps.filter { eDate(it) == d }
@@ -269,6 +282,11 @@ fun writePdf(ctx: Context, uri: Uri, s: Store, mode: String = "full") {
         p.color = android.graphics.Color.BLACK
         y += size + 8
     }
+    fun newPage(title: String) {
+        doc.finishPage(page); n++; page = doc.startPage(PdfDocument.PageInfo.Builder(595, 842, n).create()); y = 50f
+        row(listOf(s.title.ifBlank { "Contribution Information" }), 14f, true)
+        row(listOf(title), 13f, true); y += 4
+    }
     fun expHeader() = row(listOf("Purchase date", "Member", "Category", "Mode", "Amount", "Updated on"), 10f, true, EXP_X, EXP_L)
     fun expRow(e: Exp) = row(listOf(e.date, e.member, e.category, e.mode, money(e.amount), e.updated), 10f, false, EXP_X, EXP_L)
     fun memberTable() {
@@ -313,23 +331,32 @@ fun writePdf(ctx: Context, uri: Uri, s: Store, mode: String = "full") {
             y += 4; row(listOf("Total", "", "", "", money(s.totalExp), ""), 10f, true, EXP_X, EXP_L)
         }
         else -> {
-            row(listOf("Datewise collection & expense"), 13f, true)
-            dates(s).forEach { d ->
-                val cl = s.colls.filter { cDate(it) == d }; val ex = s.exps.filter { eDate(it) == d }
-                y += 4; row(listOf(d), 12f, true)
-                cl.forEach { row(listOf("Collection: ${it.member} -> ${it.toWhom}", it.at, money(it.amount))) }
-                if (cl.isNotEmpty()) row(listOf("Collection total", "", money(cl.sumOf { it.amount })), bold = true)
-                if (ex.isNotEmpty()) { expHeader(); ex.forEach { expRow(it) }; row(listOf("Total", "", "", "", money(ex.sumOf { it.amount }), ""), 10f, true, EXP_X, EXP_L) }
+            // Page 1: statement (date wise)
+            row(listOf("Statement of Collection & Expense"), 13f, true)
+            val sx = listOf(40f, 300f, 375f, 455f); val sl = listOf(52, 10, 10, 11)
+            row(listOf("Particular", "Collection", "Expense", "Balance"), 10f, true, sx, sl)
+            statement(s).forEach { r ->
+                if (r.isDate) { y += 2; row(listOf(r.date), 11f, true) }
+                else row(listOf(r.part, if (r.coll != 0.0) money(r.coll) else "", if (r.exp != 0.0) money(r.exp) else "", money(r.bal)), 10f, false, sx, sl)
             }
+            y += 4; row(listOf("Total", money(s.totalColl), money(s.totalExp), money(s.totalColl - s.totalExp)), 10f, true, sx, sl)
+            // Page 2: expense entries
+            newPage("Expense Entries")
+            expHeader()
+            s.exps.sortedWith(compareBy({ dkey(eDate(it)) }, { it.updated.drop(11) })).forEach { expRow(it) }
+            y += 4; row(listOf("Total", "", "", "", money(s.totalExp), ""), 10f, true, EXP_X, EXP_L)
             y += 8; row(listOf("Category", "Entries", "Total"), bold = true)
             CATEGORIES.forEach { c -> val l = s.exps.filter { it.category == c }; row(listOf(c, "${l.size}", money(l.sumOf { it.amount }))) }
-            row(listOf("Total Expenses", "", money(s.totalExp)), bold = true)
-            row(listOf("Total Collection", "", money(s.totalColl)), bold = true)
-            row(listOf("Difference", "", money(s.totalColl - s.totalExp)), bold = true)
+            // Page 3: differences
+            newPage("Differences")
             row(listOf("Total Members: ${s.members.size}"), bold = true)
             row(listOf("Equal share per person: ${money(s.share)}"), bold = true)
             collectorRows(); y += 8
-            memberTable(); whoGives()
+            memberTable()
+            // Page 4: who gives whom
+            newPage("Who Gives Whom")
+            row(listOf("Equal share per person: ${money(s.share)}"), bold = true)
+            whoGives()
         }
     }
     y += 10; row(listOf("Thank you! Developed by Prakash Pawar"), bold = true); row(listOf("Contact: 9892399306"))
@@ -390,7 +417,7 @@ fun ExportRow(s: Store, mode: String = "full") {
         u?.let { write(ctx, it, when (mode) { "settle" -> csvSettle(s); "coll" -> csvColl(s); "exp" -> csvExp(s); else -> csv(s) }); toast(ctx, "Excel saved") } }
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         Button({ pdf.launch("$name.pdf") }, Modifier.weight(1f)) { Text("Export PDF") }
-        Button({ xls.launch("$name.csv") }, Modifier.weight(1f)) { Text("Export Excel") }
+        if (mode != "coll" && mode != "exp") Button({ xls.launch("$name.csv") }, Modifier.weight(1f)) { Text("Export Excel") }
     }
 }
 
@@ -494,18 +521,19 @@ fun Drop(label: String, options: List<String>, sel: String, onSel: (String) -> U
 fun MemberScreen(s: Store) {
     var name by remember { mutableStateOf("") }
     var del by remember { mutableStateOf<String?>(null) }
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text("Total members: ${s.members.size}", fontWeight = FontWeight.Bold, color = Teal)
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            OutlinedTextField(name, { name = it }, label = { Text("Member name") }, modifier = Modifier.weight(1f), singleLine = true)
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text("Members: ${s.members.size}   |   Collector: ${s.collector.ifEmpty { "not selected" }}", fontWeight = FontWeight.Bold, color = Teal, fontSize = 13.sp)
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+            OutlinedTextField(name, { name = it }, label = { Text("Member name") }, modifier = Modifier.weight(1f), singleLine = true,
+                textStyle = androidx.compose.ui.text.TextStyle(fontSize = 15.sp))
             Button({ val n = name.trim(); if (n.isNotEmpty() && n !in s.members) { s.members.add(n); s.save(); name = "" } }) { Text("Add") }
         }
         Drop("Money Collector", s.members, s.collector) { s.collector = it; s.save() }
-        Text(if (s.collector.isEmpty()) "Select one collector (can be yourself)" else "Collector: ${s.collector}", fontSize = 12.sp)
-        LazyColumn { items(s.members.toList()) { m ->
+        LazyColumn { itemsIndexed(s.members.toList()) { i, m ->
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                Text(m + if (m == s.collector) "  (Collector)" else "", fontSize = 18.sp)
-                TextButton({ del = m }) { Text("Delete") } } } }
+                Text("${i + 1}. $m" + if (m == s.collector) "  (Collector)" else "", fontSize = 16.sp)
+                Text("✕", Modifier.clickable { del = m }.padding(horizontal = 14.dp, vertical = 5.dp), color = Color(0xFFB3261E), fontSize = 16.sp)
+            } } }
     }
     del?.let { m ->
         AlertDialog(
@@ -605,16 +633,26 @@ fun ExpScreen(s: Store) {
 fun ReportScreen(s: Store) {
     Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Text(s.title.ifBlank { "Contribution Information" }, fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Teal)
-        Text("Datewise collection & expense", fontWeight = FontWeight.Bold)
+        Text("Statement (date wise)", fontWeight = FontWeight.Bold)
+        Row(Modifier.fillMaxWidth()) {
+            Text("Particular", Modifier.weight(2.6f), fontSize = 11.sp, fontWeight = FontWeight.Bold); Text("Collection", Modifier.weight(1.3f), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+            Text("Expense", Modifier.weight(1.3f), fontSize = 11.sp, fontWeight = FontWeight.Bold); Text("Balance", Modifier.weight(1.4f), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+        }
+        HorizontalDivider()
         if (dates(s).isEmpty()) Text("No entries yet", fontSize = 13.sp)
-        dates(s).forEach { d ->
-            val cl = s.colls.filter { cDate(it) == d }; val ex = s.exps.filter { eDate(it) == d }
-            Text(d, Modifier.padding(top = 6.dp), fontWeight = FontWeight.Bold, color = Teal)
-            cl.forEach { Text("+ ${it.member} → ${it.toWhom}: ${money(it.amount)}", fontSize = 13.sp) }
-            if (cl.isNotEmpty()) Text("Collection total: ${money(cl.sumOf { it.amount })}", fontSize = 12.sp, fontWeight = FontWeight.Bold)
-            ex.forEach { Text("− ${it.member} • ${it.category.take(22)} • ${it.mode}: ${money(it.amount)}", fontSize = 13.sp) }
-            if (ex.isNotEmpty()) Text("Expense total: ${money(ex.sumOf { it.amount })}", fontSize = 12.sp, fontWeight = FontWeight.Bold)
-            HorizontalDivider()
+        statement(s).forEach { r ->
+            if (r.isDate) Text(r.date, Modifier.padding(top = 4.dp), fontWeight = FontWeight.Bold, color = Teal, fontSize = 13.sp)
+            else Row(Modifier.fillMaxWidth()) {
+                Text(r.part.replace("->", "→"), Modifier.weight(2.6f), fontSize = 11.sp)
+                Text(if (r.coll != 0.0) money(r.coll) else "", Modifier.weight(1.3f), fontSize = 11.sp)
+                Text(if (r.exp != 0.0) money(r.exp) else "", Modifier.weight(1.3f), fontSize = 11.sp)
+                Amt(r.bal, Modifier.weight(1.4f))
+            }
+        }
+        HorizontalDivider()
+        Row(Modifier.fillMaxWidth()) {
+            Text("Total", Modifier.weight(2.6f), fontSize = 11.sp, fontWeight = FontWeight.Bold); Text(money(s.totalColl), Modifier.weight(1.3f), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+            Text(money(s.totalExp), Modifier.weight(1.3f), fontSize = 11.sp, fontWeight = FontWeight.Bold); Amt(s.totalColl - s.totalExp, Modifier.weight(1.4f))
         }
         Text("Category-wise tally", Modifier.padding(top = 8.dp), fontWeight = FontWeight.Bold)
         Row(Modifier.fillMaxWidth()) { Text("Category", Modifier.weight(3f), fontWeight = FontWeight.Bold); Text("Qty", Modifier.weight(1f), fontWeight = FontWeight.Bold); Text("Total", Modifier.weight(1.5f), fontWeight = FontWeight.Bold) }
