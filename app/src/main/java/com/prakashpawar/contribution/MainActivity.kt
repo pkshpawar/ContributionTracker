@@ -280,6 +280,30 @@ fun pdfFit(t: String, w: Float, p: Paint): String {
     return t.substring(0, e) + "…"
 }
 
+fun pdfWrap(text: String, w: Float, p: Paint): List<String> {
+    if (text.isEmpty()) return listOf("")
+    val out = mutableListOf<String>()
+    text.split("\n").forEach { para ->
+        var line = ""
+        para.split(" ").filter { it.isNotEmpty() }.forEach { word ->
+            var wd = word
+            val trial = if (line.isEmpty()) wd else "$line $wd"
+            if (p.measureText(trial) <= w) line = trial
+            else {
+                if (line.isNotEmpty()) { out.add(line); line = "" }
+                while (p.measureText(wd) > w && wd.length > 1) {   // very long word: break by characters
+                    var e = wd.length
+                    while (e > 1 && p.measureText(wd, 0, e) > w) e--
+                    out.add(wd.substring(0, e)); wd = wd.substring(e)
+                }
+                line = wd
+            }
+        }
+        out.add(line)
+    }
+    return out
+}
+
 class PdfB(val s: Store) {
     val doc = PdfDocument()
     private var n = 0
@@ -362,7 +386,13 @@ class PdfB(val s: Store) {
         header()
         var k = 0
         rows.forEach { r ->
-            if (y + rh > H - 48f) { end(); start(); header() }   // more entries -> extra page, header repeats
+            tp.textSize = 9f; tp.isFakeBoldText = r.kind == 2
+            val lines = if (r.kind == 1) null else widths.mapIndexed { i, w ->
+                val tx = r.cells.getOrElse(i) { "" }
+                if (right[i]) listOf(pdfFit(tx, w - 8f, tp)) else pdfWrap(tx, w - 8f, tp)   // long text wraps inside the box
+            }
+            val rowH = if (lines == null) rh else maxOf(rh, lines.maxOf { it.size } * 11f + 6f)
+            if (y + rowH > H - 48f) { end(); start(); header() }   // more entries -> extra page, header repeats
             tp.textSize = 9f
             if (r.kind == 1) {
                 fp.style = Paint.Style.FILL; fp.color = C_GROUP
@@ -373,14 +403,14 @@ class PdfB(val s: Store) {
                 var x = M
                 widths.forEachIndexed { i, w ->
                     fp.style = Paint.Style.FILL; fp.color = bg
-                    page.canvas.drawRect(x, y, x + w, y + rh, fp); page.canvas.drawRect(x, y, x + w, y + rh, sp)
-                    val txt = r.cells.getOrElse(i) { "" }
+                    page.canvas.drawRect(x, y, x + w, y + rowH, fp); page.canvas.drawRect(x, y, x + w, y + rowH, sp)
                     tp.isFakeBoldText = r.kind == 2
-                    tp.color = if (txt.startsWith("-₹")) C_RED else 0xFF222222.toInt()
-                    cell(txt, x, w, y + 12f, right[i]); x += w
+                    tp.color = if (r.cells.getOrElse(i) { "" }.startsWith("-₹")) C_RED else 0xFF222222.toInt()
+                    lines!![i].forEachIndexed { j, ln -> cell(ln, x, w, y + 12f + j * 11f, right[i]) }
+                    x += w
                 }
             }
-            y += rh
+            y += rowH
         }
         y += 10f
     }
@@ -398,7 +428,7 @@ fun writePdf(ctx: Context, uri: Uri, s: Store, mode: String = "full") {
     fun expTable() {
         val rows = s.exps.sortedWith(compareBy({ dkey(eDate(it)) }, { it.updated.drop(11) }))
             .map { TRow(listOf(eDate(it), it.member, it.category, it.mode, it.desc, money(it.amount))) }
-        b.table(listOf("Purchase date", "Member", "Category", "Mode", "Description", "Amount"), listOf(66f, 80f, 130f, 45f, 117f, 85f),
+        b.table(listOf("Purchase date", "Member", "Category", "Mode", "Description", "Amount"), listOf(60f, 70f, 115f, 42f, 150f, 86f),
             listOf(false, false, false, false, false, true), rows + TRow(listOf("Total", "", "", "", "", money(s.totalExp)), 2))
     }
     fun summaryTable() {
@@ -550,7 +580,8 @@ fun MainPage(s: Store, go: (String) -> Unit, onExit: () -> Unit, welcome: Boolea
     var editing by remember { mutableStateOf(s.title.isBlank()) }   // locks after leaving the page
     val nav: (String) -> Unit = { editing = false; go(it) }
     val diff = s.totalColl - s.totalExp
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+    Column(Modifier.fillMaxSize()) {
+    Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Text("Contribution Manager", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Teal)
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             if (editing) OutlinedTextField(s.title, { s.title = it; s.save() }, label = { Text("Contribution For") }, modifier = Modifier.weight(1f), singleLine = true,
@@ -577,13 +608,14 @@ fun MainPage(s: Store, go: (String) -> Unit, onExit: () -> Unit, welcome: Boolea
             Button({ nav("report") }, Modifier.weight(1f)) { Text("Report", fontSize = 13.sp) }
         }
         Button({ nav("settle") }, Modifier.fillMaxWidth()) { Text("Members List & Who Pays Whom", fontSize = 13.sp) }
-        Button({ editing = false; showThanks = true }, Modifier.fillMaxWidth(), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFB3261E))) { Text("Exit", fontSize = 13.sp) }
         Box(Modifier.fillMaxWidth().aspectRatio(969f / 667f).clip(RoundedCornerShape(12.dp))) {
             Image(painterResource(R.drawable.welcome_picnic), "Welcome", Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
             if (welcome) Text("Welcome", Modifier.align(Alignment.TopCenter).padding(top = 8.dp)
                 .background(Color.White.copy(alpha = 0.65f), RoundedCornerShape(16.dp)).padding(horizontal = 18.dp, vertical = 2.dp),
                 fontFamily = FontFamily.Cursive, fontStyle = FontStyle.Italic, fontWeight = FontWeight.Bold, fontSize = 34.sp, color = Color(0xFFB0245B))
         }
+    }
+        Button({ editing = false; showThanks = true }, Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFB3261E))) { Text("Exit", fontSize = 13.sp) }
         if (showThanks) AlertDialog(
             onDismissRequest = { showThanks = false },
             title = { Text("Thank You!") },
