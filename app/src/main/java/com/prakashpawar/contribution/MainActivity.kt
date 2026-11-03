@@ -267,102 +267,204 @@ fun csvSettle(s: Store): String {
     return b.toString()
 }
 
+val C_TEAL = 0xFF156082.toInt(); val C_ZEBRA = 0xFFEAF3F8.toInt(); val C_GROUP = 0xFFD6EAF3.toInt()
+val C_TOTAL = 0xFFFFE9B3.toInt(); val C_LINE = 0xFFB0C4CE.toInt(); val C_RED = 0xFFB3261E.toInt()
+val C_ORANGE = 0xFFE67E22.toInt(); val C_GREEN = 0xFF2E8B57.toInt(); val C_PURPLE = 0xFF6A4C93.toInt(); val C_WHITE = 0xFFFFFFFF.toInt()
+
+class TRow(val cells: List<String>, val kind: Int = 0)   // kind: 0 normal, 1 group (date), 2 total
+
+fun pdfFit(t: String, w: Float, p: Paint): String {
+    if (p.measureText(t) <= w) return t
+    var e = t.length
+    while (e > 0 && p.measureText(t, 0, e) + p.measureText("…") > w) e--
+    return t.substring(0, e) + "…"
+}
+
+class PdfB(val s: Store) {
+    val doc = PdfDocument()
+    private var n = 0
+    private lateinit var page: PdfDocument.Page
+    private var y = 0f
+    private val W = 595f; private val H = 842f; private val M = 36f
+    private val date = SimpleDateFormat("dd.MM.yyyy", Locale.getDefault()).format(Date())
+    private val tp = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val fp = Paint()
+    private val sp = Paint().apply { style = Paint.Style.STROKE; strokeWidth = 0.6f; color = C_LINE }
+    init { start() }
+
+    private fun start() { n++; page = doc.startPage(PdfDocument.PageInfo.Builder(W.toInt(), H.toInt(), n).create()); y = 40f }
+    private fun end() {
+        page.canvas.drawLine(M, H - 36f, W - M, H - 36f, sp)
+        tp.textSize = 8f; tp.isFakeBoldText = false; tp.color = 0xFF555555.toInt()
+        tp.textAlign = Paint.Align.LEFT
+        page.canvas.drawText("ContributionTracker Dev. by Prakash Pawar - 9892399306  $date", M, H - 22f, tp)
+        tp.textAlign = Paint.Align.RIGHT
+        page.canvas.drawText("Page $n", W - M, H - 22f, tp)
+        tp.textAlign = Paint.Align.LEFT
+        doc.finishPage(page)
+    }
+    fun section(name: String) { end(); start(); banner(name) }
+
+    fun banner(name: String) {
+        fp.style = Paint.Style.FILL; fp.color = C_TEAL
+        page.canvas.drawRect(0f, 0f, W, 56f, fp)
+        tp.color = C_WHITE; tp.textSize = 17f; tp.isFakeBoldText = true
+        page.canvas.drawText(pdfFit(s.title.ifBlank { "Contribution Information" }, W - 2 * M, tp), M, 27f, tp)
+        tp.textSize = 10f; tp.isFakeBoldText = false
+        page.canvas.drawText(name, M, 45f, tp)
+        tp.textAlign = Paint.Align.RIGHT
+        page.canvas.drawText("Collector: ${s.collector.ifEmpty { "-" }}  |  Members: ${s.members.size}", W - M, 45f, tp)
+        tp.textAlign = Paint.Align.LEFT
+        y = 70f
+    }
+
+    fun boxes(items: List<Triple<String, String, Int>>) {
+        val gap = 8f; val bw = (W - 2 * M - gap * (items.size - 1)) / items.size; val bh = 40f
+        items.forEachIndexed { i, (lab, v, col) ->
+            val x = M + i * (bw + gap)
+            fp.style = Paint.Style.FILL; fp.color = col
+            page.canvas.drawRoundRect(x, y, x + bw, y + bh, 6f, 6f, fp)
+            tp.color = C_WHITE; tp.isFakeBoldText = false; tp.textSize = 8.5f
+            page.canvas.drawText(pdfFit(lab, bw - 12f, tp), x + 8f, y + 14f, tp)
+            tp.isFakeBoldText = true; tp.textSize = 13f
+            page.canvas.drawText(pdfFit(v, bw - 12f, tp), x + 8f, y + 32f, tp)
+        }
+        y += bh + 12f
+    }
+
+    fun label(text: String) {
+        tp.color = C_TEAL; tp.isFakeBoldText = true; tp.textSize = 11f
+        page.canvas.drawText(text, M, y + 11f, tp); y += 18f
+    }
+    fun note(text: String) {
+        tp.color = 0xFF666666.toInt(); tp.isFakeBoldText = false; tp.textSize = 8f
+        page.canvas.drawText(text, M, y + 9f, tp); y += 12f
+    }
+
+    fun table(heads: List<String>, widths: List<Float>, right: List<Boolean>, rows: List<TRow>) {
+        val rh = 17f; val tw = widths.sum()
+        fun cell(text: String, x: Float, w: Float, base: Float, r: Boolean) {
+            val tx = pdfFit(text, w - 8f, tp)
+            if (r) { tp.textAlign = Paint.Align.RIGHT; page.canvas.drawText(tx, x + w - 4f, base, tp) }
+            else { tp.textAlign = Paint.Align.LEFT; page.canvas.drawText(tx, x + 4f, base, tp) }
+            tp.textAlign = Paint.Align.LEFT
+        }
+        fun header() {
+            var x = M
+            tp.textSize = 9f; tp.isFakeBoldText = true
+            heads.forEachIndexed { i, h ->
+                fp.style = Paint.Style.FILL; fp.color = C_TEAL
+                page.canvas.drawRect(x, y, x + widths[i], y + rh, fp); page.canvas.drawRect(x, y, x + widths[i], y + rh, sp)
+                tp.color = C_WHITE; cell(h, x, widths[i], y + 12f, right[i]); x += widths[i]
+            }
+            y += rh
+        }
+        header()
+        var k = 0
+        rows.forEach { r ->
+            if (y + rh > H - 48f) { end(); start(); header() }   // more entries -> extra page, header repeats
+            tp.textSize = 9f
+            if (r.kind == 1) {
+                fp.style = Paint.Style.FILL; fp.color = C_GROUP
+                page.canvas.drawRect(M, y, M + tw, y + rh, fp); page.canvas.drawRect(M, y, M + tw, y + rh, sp)
+                tp.isFakeBoldText = true; tp.color = C_TEAL; cell(r.cells[0], M, tw, y + 12f, false)
+            } else {
+                val bg = if (r.kind == 2) C_TOTAL else if (k++ % 2 == 1) C_ZEBRA else C_WHITE
+                var x = M
+                widths.forEachIndexed { i, w ->
+                    fp.style = Paint.Style.FILL; fp.color = bg
+                    page.canvas.drawRect(x, y, x + w, y + rh, fp); page.canvas.drawRect(x, y, x + w, y + rh, sp)
+                    val txt = r.cells.getOrElse(i) { "" }
+                    tp.isFakeBoldText = r.kind == 2
+                    tp.color = if (txt.startsWith("-₹")) C_RED else 0xFF222222.toInt()
+                    cell(txt, x, w, y + 12f, right[i]); x += w
+                }
+            }
+            y += rh
+        }
+        y += 10f
+    }
+
+    fun finish(ctx: Context, uri: Uri) {
+        end()
+        ctx.contentResolver.openOutputStream(uri)?.use { doc.writeTo(it) }
+        doc.close()
+    }
+}
+
 // mode: "full" | "settle" | "coll" | "exp"
 fun writePdf(ctx: Context, uri: Uri, s: Store, mode: String = "full") {
-    val doc = PdfDocument(); var n = 1
-    var page = doc.startPage(PdfDocument.PageInfo.Builder(595, 842, n).create()); var y = 50f
-    val p = Paint()
-    fun row(cols: List<String>, size: Float = 11f, bold: Boolean = false, cx: List<Float>? = null, lim: List<Int>? = null) {
-        if (y > 790) { doc.finishPage(page); n++; page = doc.startPage(PdfDocument.PageInfo.Builder(595, 842, n).create()); y = 50f }
-        p.textSize = size; p.isFakeBoldText = bold
-        val xs = cx ?: if (cols.size == 4) listOf(40f, 220f, 330f, 440f) else listOf(40f, 320f, 430f)
-        xs.forEachIndexed { i, x -> cols.getOrNull(i)?.let { c ->
-            p.color = if (c.startsWith("-₹")) android.graphics.Color.RED else android.graphics.Color.BLACK
-            page.canvas.drawText(c.take(lim?.getOrNull(i) ?: if (i == 0) (if (cols.size == 4) 26 else 48) else 16), x, y, p) } }
-        p.color = android.graphics.Color.BLACK
-        y += size + 8
+    val b = PdfB(s)
+    fun expTable() {
+        val rows = s.exps.sortedWith(compareBy({ dkey(eDate(it)) }, { it.updated.drop(11) }))
+            .map { TRow(listOf(eDate(it), it.member, it.category, it.mode, it.desc, money(it.amount))) }
+        b.table(listOf("Purchase date", "Member", "Category", "Mode", "Description", "Amount"), listOf(66f, 80f, 130f, 45f, 117f, 85f),
+            listOf(false, false, false, false, false, true), rows + TRow(listOf("Total", "", "", "", "", money(s.totalExp)), 2))
     }
-    fun newPage(title: String) {
-        doc.finishPage(page); n++; page = doc.startPage(PdfDocument.PageInfo.Builder(595, 842, n).create()); y = 50f
-        row(listOf(s.title.ifBlank { "Contribution Information" }), 14f, true)
-        row(listOf(title), 13f, true); y += 4
+    fun summaryTable() {
+        val kv = mutableListOf("Total members" to "${s.members.size}", "Equal share per person (rounded up)" to money(s.share))
+        if (s.members.isNotEmpty() && abs(s.shareOf(s.absorberName) - s.share) > 0.004) kv.add("Collector share (incl. rounding difference)" to money(s.shareOf(s.absorberName)))
+        kv.add("Collector" to s.collector.ifEmpty { "-" }); kv.add("Collected by collector" to money(s.collected))
+        kv.add("Expense paid by collector" to money(s.collectorSpent)); kv.add(s.cashLabel() to money(abs(s.collectorCash)))
+        b.table(listOf("Item", "Value"), listOf(350f, 173f), listOf(false, true), kv.map { TRow(listOf(it.first, it.second)) })
     }
-    fun expHeader() = row(listOf("Purchase date", "Member", "Category", "Mode", "Amount", "Updated on"), 10f, true, EXP_X, EXP_L)
-    fun expRow(e: Exp) = row(listOf(e.date, e.member, e.category, e.mode, money(e.amount), e.updated), 10f, false, EXP_X, EXP_L)
     fun memberTable() {
-        row(listOf("Member", "Paid", "Difference", "Balance"), bold = true)
-        s.members.forEach { row(listOf(it, money(s.paid(it)), money(s.difference(it)), money(s.stmtBalance(it)))) }
-        row(listOf("Paid = expense by member")); row(listOf("Difference = contributed + expense")); row(listOf("Balance = equal share - difference"))
+        b.table(listOf("Member", "Paid", "Difference", "Balance"), listOf(193f, 110f, 110f, 110f), listOf(false, true, true, true),
+            s.members.map { TRow(listOf(it, money(s.paid(it)), money(s.difference(it)), money(s.stmtBalance(it)))) })
+        b.note("Paid = expense by member   |   Difference = contributed + expense   |   Balance = equal share - difference (minus = to receive)")
     }
     fun whoGives() {
-        y += 8; row(listOf("Who gives -> To whom", "", "Amount"), bold = true)
-        s.settlements().forEach { row(listOf("${it.first} -> ${it.second}", "", money(it.third))) }
-        if (s.settlements().isEmpty()) row(listOf("All settled"))
+        val st = s.settlements()
+        if (st.isEmpty()) { b.note("All settled - nobody needs to pay."); return }
+        b.table(listOf("#", "Who gives", "To whom", "Amount"), listOf(30f, 195f, 195f, 103f), listOf(false, false, false, true),
+            st.mapIndexed { i, x -> TRow(listOf("${i + 1}", x.first, x.second, money(x.third))) } + TRow(listOf("", "Total", "", money(st.sumOf { it.third })), 2))
     }
-    fun collectorRows() {
-        row(listOf("Collector: ${s.collector.ifEmpty { "-" }}   Collected: ${money(s.collected)}"), bold = true)
-        row(listOf("Expense by collector: ${money(s.collectorSpent)}"), bold = true)
-        row(listOf("${s.cashLabel()}: ${money(abs(s.collectorCash))}"), bold = true)
-        if (s.members.isNotEmpty() && abs(s.shareOf(s.absorberName) - s.share) > 0.004) row(listOf("Collector share (rounding adj.): ${money(s.shareOf(s.absorberName))}"))
-    }
-    row(listOf(s.title.ifBlank { "Contribution Information" }), 18f, true)
-    when (mode) { "settle" -> "Members & Settlement Report"; "coll" -> "Collection Report"; "exp" -> "Expense Report"; else -> "" }
-        .takeIf { it.isNotEmpty() }?.let { row(listOf(it), 13f, true) }
-    row(listOf("Report generated: " + now())); y += 8
-
+    val diff = s.totalColl - s.totalExp
     when (mode) {
         "settle" -> {
-            row(listOf("Total Members: ${s.members.size}"), bold = true)
-            row(listOf("Total Expense: ${money(s.totalExp)}"), bold = true)
-            row(listOf("Equal share per person: ${money(s.share)}"), bold = true)
-            collectorRows(); y += 8
-            memberTable(); whoGives()
+            b.banner("Members & Settlement Report")
+            summaryTable(); b.label("Members"); memberTable(); b.label("Who gives whom"); whoGives()
         }
         "coll" -> {
-            val cx = listOf(40f, 140f, 260f, 380f); val lim = listOf(16, 16, 16, 14)
-            row(listOf("Collector: ${s.collector.ifEmpty { "-" }}"), bold = true); y += 4
-            row(listOf("Entered on", "Who gave", "To whom", "Amount"), 10f, true, cx, lim)
-            s.colls.sortedWith(compareBy({ dkey(cDate(it)) }, { it.at.drop(11) })).forEach { row(listOf(it.at.ifEmpty { "-" }, it.member, it.toWhom, money(it.amount)), 10f, false, cx, lim) }
-            y += 4; row(listOf("Total collection", "", "", money(s.totalColl)), 10f, true, cx, lim)
+            b.banner("Collection Report")
+            b.boxes(listOf(Triple("Collector", s.collector.ifEmpty { "-" }, C_TEAL), Triple("Total collection", money(s.totalColl), C_GREEN), Triple("Entries", "${s.colls.size}", C_PURPLE)))
+            val rows = s.colls.sortedWith(compareBy({ dkey(cDate(it)) }, { it.at.drop(11) }))
+                .map { TRow(listOf(it.at.ifEmpty { "-" }, it.member, it.toWhom, money(it.amount))) }
+            b.table(listOf("Entered on", "Who gave", "To whom", "Amount"), listOf(120f, 150f, 150f, 103f), listOf(false, false, false, true),
+                rows + TRow(listOf("Total", "", "", money(s.totalColl)), 2))
         }
         "exp" -> {
-            expHeader()
-            s.exps.sortedWith(compareBy({ dkey(eDate(it)) }, { it.updated.drop(11) })).forEach { expRow(it) }
-            y += 4; row(listOf("Total", "", "", "", money(s.totalExp), ""), 10f, true, EXP_X, EXP_L)
+            b.banner("Expense Report")
+            b.boxes(listOf(Triple("Total expense", money(s.totalExp), C_ORANGE), Triple("Entries", "${s.exps.size}", C_PURPLE), Triple("Share / person", money(s.share), C_TEAL)))
+            expTable()
         }
         else -> {
             // Page 1: statement (date wise)
-            row(listOf("Statement of Collection & Expense"), 13f, true)
-            val sx = listOf(40f, 300f, 375f, 455f); val sl = listOf(52, 10, 10, 11)
-            row(listOf("Particular", "Collection", "Expense", "Balance"), 10f, true, sx, sl)
+            b.banner("Statement of Collection & Expense")
+            b.boxes(listOf(Triple("Total collection", money(s.totalColl), C_TEAL), Triple("Total expense", money(s.totalExp), C_ORANGE),
+                Triple("Balance", money(diff), if (diff < -0.004) C_RED else C_GREEN), Triple("Share / person", money(s.share), C_PURPLE)))
+            val rows = mutableListOf<TRow>()
             statement(s).forEach { r ->
-                if (r.isDate) { y += 2; row(listOf(r.date), 11f, true) }
-                else row(listOf(r.part, if (r.coll != 0.0) money(r.coll) else "", if (r.exp != 0.0) money(r.exp) else "", money(r.bal)), 10f, false, sx, sl)
+                if (r.isDate) rows.add(TRow(listOf(r.date), 1))
+                else rows.add(TRow(listOf(r.part, if (r.coll != 0.0) money(r.coll) else "", if (r.exp != 0.0) money(r.exp) else "", money(r.bal))))
             }
-            y += 4; row(listOf("Total", money(s.totalColl), money(s.totalExp), money(s.totalColl - s.totalExp)), 10f, true, sx, sl)
+            rows.add(TRow(listOf("Total", money(s.totalColl), money(s.totalExp), money(diff)), 2))
+            b.table(listOf("Particular", "Collection", "Expense", "Balance"), listOf(263f, 80f, 80f, 100f), listOf(false, true, true, true), rows)
             // Page 2: expense entries
-            newPage("Expense Entries")
-            expHeader()
-            s.exps.sortedWith(compareBy({ dkey(eDate(it)) }, { it.updated.drop(11) })).forEach { expRow(it) }
-            y += 4; row(listOf("Total", "", "", "", money(s.totalExp), ""), 10f, true, EXP_X, EXP_L)
-            y += 8; row(listOf("Category", "Entries", "Total"), bold = true)
-            CATEGORIES.forEach { c -> val l = s.exps.filter { it.category == c }; row(listOf(c, "${l.size}", money(l.sumOf { it.amount }))) }
+            b.section("Expense Entries")
+            expTable()
+            b.label("Category-wise tally")
+            val cats = CATEGORIES.map { c -> val l = s.exps.filter { it.category == c }; TRow(listOf(c, "${l.size}", money(l.sumOf { it.amount }))) }
+            b.table(listOf("Category", "Entries", "Total"), listOf(323f, 70f, 130f), listOf(false, true, true), cats + TRow(listOf("Total", "${s.exps.size}", money(s.totalExp)), 2))
             // Page 3: differences
-            newPage("Differences")
-            row(listOf("Total Members: ${s.members.size}"), bold = true)
-            row(listOf("Equal share per person: ${money(s.share)}"), bold = true)
-            collectorRows(); y += 8
-            memberTable()
+            b.section("Differences")
+            summaryTable(); b.label("Members"); memberTable()
             // Page 4: who gives whom
-            newPage("Who Gives Whom")
-            row(listOf("Equal share per person: ${money(s.share)}"), bold = true)
-            whoGives()
+            b.section("Who Gives Whom")
+            b.note("Equal share per person: ${money(s.share)}"); whoGives()
         }
     }
-    y += 10; row(listOf("Thank you! Developed by Prakash Pawar"), bold = true); row(listOf("Contact: 9892399306"))
-    doc.finishPage(page)
-    ctx.contentResolver.openOutputStream(uri)?.use { doc.writeTo(it) }
-    doc.close()
+    b.finish(ctx, uri)
 }
 
 class MainActivity : ComponentActivity() {
@@ -633,24 +735,24 @@ fun ExpScreen(s: Store) {
 fun ReportScreen(s: Store) {
     Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Text(s.title.ifBlank { "Contribution Information" }, fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Teal)
-        Text("Statement (date wise)", fontWeight = FontWeight.Bold)
-        Row(Modifier.fillMaxWidth()) {
-            Text("Particular", Modifier.weight(2.6f), fontSize = 11.sp, fontWeight = FontWeight.Bold); Text("Collection", Modifier.weight(1.3f), fontSize = 11.sp, fontWeight = FontWeight.Bold)
-            Text("Expense", Modifier.weight(1.3f), fontSize = 11.sp, fontWeight = FontWeight.Bold); Text("Balance", Modifier.weight(1.4f), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+        Text("Statement (date wise)", fontWeight = FontWeight.Bold, color = Teal)
+        Row(Modifier.fillMaxWidth().background(Teal).padding(horizontal = 4.dp, vertical = 4.dp)) {
+            Text("Particular", Modifier.weight(2.6f), fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color.White); Text("Collection", Modifier.weight(1.3f), fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color.White)
+            Text("Expense", Modifier.weight(1.3f), fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color.White); Text("Balance", Modifier.weight(1.4f), fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color.White)
         }
-        HorizontalDivider()
         if (dates(s).isEmpty()) Text("No entries yet", fontSize = 13.sp)
+        var k = 0
         statement(s).forEach { r ->
-            if (r.isDate) Text(r.date, Modifier.padding(top = 4.dp), fontWeight = FontWeight.Bold, color = Teal, fontSize = 13.sp)
-            else Row(Modifier.fillMaxWidth()) {
-                Text(r.part.replace("->", "→"), Modifier.weight(2.6f), fontSize = 11.sp)
-                Text(if (r.coll != 0.0) money(r.coll) else "", Modifier.weight(1.3f), fontSize = 11.sp)
-                Text(if (r.exp != 0.0) money(r.exp) else "", Modifier.weight(1.3f), fontSize = 11.sp)
-                Amt(r.bal, Modifier.weight(1.4f))
-            }
+            if (r.isDate) Text(r.date, Modifier.fillMaxWidth().background(Color(0xFFD6EAF3)).padding(horizontal = 4.dp, vertical = 2.dp), fontWeight = FontWeight.Bold, color = Teal, fontSize = 12.sp)
+            else { k++
+                Row(Modifier.fillMaxWidth().background(if (k % 2 == 0) Color(0xFFEAF3F8) else Color.White).padding(horizontal = 4.dp, vertical = 2.dp)) {
+                    Text(r.part.replace("->", "→"), Modifier.weight(2.6f), fontSize = 11.sp)
+                    Text(if (r.coll != 0.0) money(r.coll) else "", Modifier.weight(1.3f), fontSize = 11.sp)
+                    Text(if (r.exp != 0.0) money(r.exp) else "", Modifier.weight(1.3f), fontSize = 11.sp)
+                    Amt(r.bal, Modifier.weight(1.4f))
+                } }
         }
-        HorizontalDivider()
-        Row(Modifier.fillMaxWidth()) {
+        Row(Modifier.fillMaxWidth().background(Color(0xFFFFE9B3)).padding(horizontal = 4.dp, vertical = 4.dp)) {
             Text("Total", Modifier.weight(2.6f), fontSize = 11.sp, fontWeight = FontWeight.Bold); Text(money(s.totalColl), Modifier.weight(1.3f), fontSize = 11.sp, fontWeight = FontWeight.Bold)
             Text(money(s.totalExp), Modifier.weight(1.3f), fontSize = 11.sp, fontWeight = FontWeight.Bold); Amt(s.totalColl - s.totalExp, Modifier.weight(1.4f))
         }
